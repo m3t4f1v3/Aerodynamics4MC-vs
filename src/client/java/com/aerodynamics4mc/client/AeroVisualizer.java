@@ -95,6 +95,7 @@ final class AeroVisualizer {
         if (!streamingEnabled || packedFlow == null || packedFlow.length == 0) {
             return;
         }
+        short[] localPackedFlow = java.util.Arrays.copyOf(packedFlow, packedFlow.length);
         WindowKey key = new WindowKey(dimensionId, origin);
         localWindows.put(
             key,
@@ -102,7 +103,7 @@ final class AeroVisualizer {
                 dimensionId,
                 origin,
                 1,
-                packedFlow,
+                localPackedFlow,
                 AeroWindSample.Authority.CLIENT_LOCAL,
                 clientTickCounter
             )

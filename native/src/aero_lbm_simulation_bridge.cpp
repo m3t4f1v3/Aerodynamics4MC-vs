@@ -641,6 +641,11 @@ void seed_brick_from_neighbor_means(
     const std::unordered_map<BrickCoord, std::shared_ptr<const DynamicRegionData>, BrickCoordHash>& snapshots,
     DynamicRegionData& dynamic
 );
+bool seed_brick_from_boundary_reference(
+    const FluidWorldRuntime& runtime,
+    const BrickData& brick,
+    DynamicRegionData& dynamic
+);
 void copy_brick_face_ghost_from_neighbor(
     const FluidWorldRuntime& runtime,
     const DynamicRegionData& neighbor,
@@ -770,7 +775,9 @@ bool step_brick_world_runtime(ServiceState& service, long long world_key, FluidW
             const bool needs_seed_fill = needs_seed.find(entry.first) != needs_seed.end();
             const bool needs_face_bootstrap = needs_seed_fill || brick.context_key == 0;
             if (needs_seed_fill) {
-                seed_brick_from_neighbor_means(runtime, entry.first, snapshots, *next_dynamic);
+                if (!seed_brick_from_boundary_reference(runtime, brick, *next_dynamic)) {
+                    seed_brick_from_neighbor_means(runtime, entry.first, snapshots, *next_dynamic);
+                }
             }
             if (needs_face_bootstrap) {
                 for (int i = 0; i < k_brick_face_neighbor_count; ++i) {
@@ -970,6 +977,21 @@ void seed_brick_from_neighbor_means(
         dynamic.air_temperature[cell] = accum.air_temperature;
         dynamic.surface_temperature[cell] = accum.surface_temperature;
     }
+}
+
+bool seed_brick_from_boundary_reference(
+    const FluidWorldRuntime& runtime,
+    const BrickData& brick,
+    DynamicRegionData& dynamic
+) {
+    const DynamicRegionData* reference = brick.boundary_reference_region.get();
+    if (!brick_dynamic_region_valid(runtime, reference) || !brick_dynamic_region_valid(runtime, &dynamic)) {
+        return false;
+    }
+    dynamic.flow_state = reference->flow_state;
+    dynamic.air_temperature = reference->air_temperature;
+    dynamic.surface_temperature = reference->surface_temperature;
+    return true;
 }
 
 void copy_brick_face_ghost_from_neighbor(

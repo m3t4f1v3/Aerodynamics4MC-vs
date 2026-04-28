@@ -678,6 +678,9 @@ final class WorldMirror {
                 long generation = entry.generation;
                 loadExecutor.execute(() -> loadSectionFromStore(server, worldKey, alignedOrigin, generation));
             }
+            if (highPriority) {
+                queueLiveBuildLocked(worldKey, alignedOrigin, entry, true);
+            }
             return;
         }
         queueLiveBuildLocked(worldKey, alignedOrigin, entry, highPriority);

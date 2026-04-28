@@ -154,13 +154,13 @@ public final class NativeSimulationBridge {
         }
         int brickCount = brickCoords.length / BRICK_HINT_COORDS_PER_BRICK;
         if (!exactActiveHintsSupported) {
-            return nativeSetBrickWorldActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+            return false;
         }
         try {
             return nativeSetBrickWorldExactActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
         } catch (UnsatisfiedLinkError error) {
             exactActiveHintsSupported = false;
-            return nativeSetBrickWorldActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+            return false;
         }
     }
 
