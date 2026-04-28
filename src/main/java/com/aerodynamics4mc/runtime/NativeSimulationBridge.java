@@ -29,6 +29,7 @@ public final class NativeSimulationBridge {
     private static final boolean LOADED;
     private static final String LOAD_ERROR;
     private static volatile boolean nestedFeedbackStatusSupported = true;
+    private static volatile boolean exactActiveHintsSupported = true;
 
     static {
         boolean loaded = false;
@@ -137,6 +138,30 @@ public final class NativeSimulationBridge {
             brickCoords,
             brickCoords.length / BRICK_HINT_COORDS_PER_BRICK
         );
+    }
+
+    public boolean setBrickWorldExactActiveHints(
+        long serviceKey,
+        long worldKey,
+        int brickSize,
+        int[] brickCoords
+    ) {
+        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0 || brickCoords == null) {
+            return false;
+        }
+        if ((brickCoords.length % BRICK_HINT_COORDS_PER_BRICK) != 0) {
+            return false;
+        }
+        int brickCount = brickCoords.length / BRICK_HINT_COORDS_PER_BRICK;
+        if (!exactActiveHintsSupported) {
+            return nativeSetBrickWorldActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+        }
+        try {
+            return nativeSetBrickWorldExactActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+        } catch (UnsatisfiedLinkError error) {
+            exactActiveHintsSupported = false;
+            return nativeSetBrickWorldActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+        }
     }
 
     public BrickWorldRuntimeStatus getBrickWorldRuntimeStatus(long serviceKey, long worldKey) {
@@ -1122,6 +1147,14 @@ public final class NativeSimulationBridge {
     );
 
     private static native boolean nativeSetBrickWorldActiveHints(
+        long serviceKey,
+        long worldKey,
+        int brickSize,
+        int[] brickCoords,
+        int brickCount
+    );
+
+    private static native boolean nativeSetBrickWorldExactActiveHints(
         long serviceKey,
         long worldKey,
         int brickSize,

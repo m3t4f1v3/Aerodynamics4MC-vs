@@ -29,7 +29,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.aerodynamics4mc.FanBlock;
 import com.aerodynamics4mc.ModBlocks;
+import com.aerodynamics4mc.api.AeroWindSample;
+import com.aerodynamics4mc.api.SamplePolicy;
 import com.aerodynamics4mc.flow.AnalysisFlowCodec;
+import com.aerodynamics4mc.net.AeroCoarseWindPayload;
 import com.aerodynamics4mc.net.AeroFlowPayload;
 import com.aerodynamics4mc.net.AeroFlowAnalysisPayload;
 import com.aerodynamics4mc.net.AeroRuntimeStatePayload;
@@ -64,6 +67,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.LightType;
 import net.minecraft.world.World;
@@ -113,6 +117,10 @@ public final class AeroServerRuntime {
     private static final int PARTICLE_FLOW_SAMPLE_STRIDE = 1;
     private static final float ATLAS_VELOCITY_QUANT_RANGE = 5.6f;
     private static final float ATLAS_PRESSURE_QUANT_RANGE = 0.03f;
+    private static final int COARSE_WIND_SYNC_CELL_SIZE_BLOCKS = 32;
+    private static final int COARSE_WIND_SYNC_SIZE_X = 9;
+    private static final int COARSE_WIND_SYNC_SIZE_Y = 5;
+    private static final int COARSE_WIND_SYNC_SIZE_Z = 9;
     private static final float ANALYSIS_FLOW_VELOCITY_TOLERANCE = 0.02f;
     private static final float ANALYSIS_FLOW_PRESSURE_TOLERANCE = 0.0005f;
     private static final int L2_CAPTURE_DEFAULT_DURATION_SECONDS = 30;
@@ -381,6 +389,42 @@ public final class AeroServerRuntime {
             return null;
         }
         return INSTANCE.publishedEntitySamples.get().get(entityId);
+    }
+
+    public static AeroWindSample sampleWind(ServerWorld world, Vec3d position) {
+        return sampleFlow(world, position);
+    }
+
+    public static AeroWindSample sampleFlow(ServerWorld world, Vec3d position) {
+        return sampleFlow(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static AeroWindSample sampleFlow(ServerWorld world, Vec3d position, SamplePolicy policy) {
+        if (world == null || position == null) {
+            return AeroWindSample.ZERO;
+        }
+        return INSTANCE.sampleWind(world.getRegistryKey(), BlockPos.ofFloored(position), policy);
+    }
+
+    public static AeroWindSample sampleWind(ServerWorld world, BlockPos position) {
+        return sampleFlow(world, position);
+    }
+
+    public static AeroWindSample sampleFlow(ServerWorld world, BlockPos position) {
+        return sampleFlow(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static AeroWindSample sampleFlow(ServerWorld world, BlockPos position, SamplePolicy policy) {
+        if (world == null || position == null) {
+            return AeroWindSample.ZERO;
+        }
+        return INSTANCE.sampleWind(world.getRegistryKey(), position, policy);
+    }
+
+    private AeroWindSample sampleWind(RegistryKey<World> worldKey, BlockPos position, SamplePolicy policy) {
+        synchronized (simulationStateLock) {
+            return sampleWindLocked(worldKey, position, policy);
+        }
     }
 
     private void onChunkLoad(ServerWorld world, WorldChunk chunk) {
@@ -2565,18 +2609,25 @@ public final class AeroServerRuntime {
         ensureSimulationCoordinatorRunning();
         recordMainThreadPhase(MAIN_THREAD_PHASE_COORDINATOR, System.nanoTime() - phaseStartNanos);
 
+        boolean shouldSyncFlow = tickCounter % PARTICLE_FLOW_SYNC_INTERVAL_TICKS == 0;
         PublishedFrame frame = publishedFrame.get();
         if (frame == null || frame.regionAtlases().isEmpty()) {
+            if (shouldSyncFlow) {
+                phaseStartNanos = System.nanoTime();
+                syncCoarseWindToPlayers(server);
+                recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, System.nanoTime() - phaseStartNanos);
+            } else {
+                recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, 0L);
+            }
             updateSimulationRate(0);
             lastMaxFlowSpeed = 0.0f;
-            recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, 0L);
             recordMainThreadPhase(MAIN_THREAD_PHASE_TOTAL, System.nanoTime() - tickStartNanos);
             return;
         }
 
-        boolean shouldSyncFlow = tickCounter % PARTICLE_FLOW_SYNC_INTERVAL_TICKS == 0;
         if (shouldSyncFlow) {
             phaseStartNanos = System.nanoTime();
+            syncCoarseWindToPlayers(server);
             syncPublishedFlowToPlayers(server, frame);
             tickL2Capture(server);
             recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, System.nanoTime() - phaseStartNanos);
@@ -6961,6 +7012,94 @@ public final class AeroServerRuntime {
         );
     }
 
+    private AeroWindSample sampleWindLocked(RegistryKey<World> worldKey, BlockPos probePos, SamplePolicy policy) {
+        SamplePolicy effectivePolicy = policy == null ? SamplePolicy.GAMEPLAY_SERVER_ONLY : policy;
+        SampledPoint brickSample = sampleBrickRuntimePointLocked(worldKey, probePos);
+        if (brickSample != null) {
+            return AeroWindSample.serverAuthoritative(
+                brickSample.velocityX(),
+                brickSample.velocityY(),
+                brickSample.velocityZ(),
+                brickSample.pressure(),
+                AeroWindSample.Level.L2,
+                AeroWindSample.UNKNOWN_EPOCH,
+                AeroWindSample.UNKNOWN_EPOCH,
+                tickCounter
+            );
+        }
+        if (!effectivePolicy.allowServerCoarse()) {
+            return AeroWindSample.ZERO;
+        }
+        return sampleCoarseWindLocked(worldKey, probePos);
+    }
+
+    private AeroWindSample sampleCoarseWindLocked(RegistryKey<World> worldKey, BlockPos probePos) {
+        MesoscaleGrid.Sample mesoscaleSample = sampleMesoscaleMet(worldKey, probePos);
+        if (mesoscaleSample != null) {
+            float horizontalSpeed = (float) Math.sqrt(
+                mesoscaleSample.windX() * mesoscaleSample.windX()
+                    + mesoscaleSample.windZ() * mesoscaleSample.windZ()
+            );
+            return AeroWindSample.serverAuthoritative(
+                mesoscaleSample.windX(),
+                sampleCoarseVerticalVelocityLocked(worldKey, probePos, horizontalSpeed),
+                mesoscaleSample.windZ(),
+                0.0f,
+                AeroWindSample.Level.L1,
+                tickCounter,
+                AeroWindSample.UNKNOWN_EPOCH,
+                AeroWindSample.UNKNOWN_EPOCH
+            );
+        }
+        BackgroundMetGrid.Sample backgroundSample = sampleBackgroundMet(worldKey, probePos);
+        if (backgroundSample != null) {
+            float horizontalSpeed = (float) Math.sqrt(
+                backgroundSample.backgroundWindX() * backgroundSample.backgroundWindX()
+                    + backgroundSample.backgroundWindZ() * backgroundSample.backgroundWindZ()
+            );
+            return AeroWindSample.serverAuthoritative(
+                backgroundSample.backgroundWindX(),
+                sampleCoarseVerticalVelocityLocked(worldKey, probePos, horizontalSpeed),
+                backgroundSample.backgroundWindZ(),
+                0.0f,
+                AeroWindSample.Level.L0,
+                AeroWindSample.UNKNOWN_EPOCH,
+                AeroWindSample.UNKNOWN_EPOCH,
+                AeroWindSample.UNKNOWN_EPOCH
+            );
+        }
+        return AeroWindSample.ZERO;
+    }
+
+    private SampledPoint sampleCoarsePointLocked(RegistryKey<World> worldKey, BlockPos probePos) {
+        AeroWindSample wind = sampleCoarseWindLocked(worldKey, probePos);
+        if (!wind.hasFlow()) {
+            return null;
+        }
+        ThermalEnvironment environment = sampleThermalEnvironment(
+            worldEnvironmentSnapshots.get(worldKey),
+            worldKey,
+            probePos,
+            SOLVER_STEP_SECONDS
+        );
+        return new SampledPoint(
+            wind.velocityX(),
+            wind.velocityY(),
+            wind.velocityZ(),
+            wind.pressure(),
+            environment.ambientAirTemperatureKelvin(),
+            environment.deepGroundTemperatureKelvin()
+        );
+    }
+
+    private float sampleCoarseVerticalVelocityLocked(RegistryKey<World> worldKey, BlockPos probePos, float horizontalSpeed) {
+        int layerMinY = Math.floorDiv(probePos.getY(), MESOSCALE_MET_LAYER_HEIGHT_BLOCKS) * MESOSCALE_MET_LAYER_HEIGHT_BLOCKS;
+        float divergence = sampleHorizontalDivergence(worldKey, probePos, null);
+        float centeredY = (float) ((probePos.getY() + 0.5) - (layerMinY + MESOSCALE_MET_LAYER_HEIGHT_BLOCKS * 0.5));
+        float clamp = Math.max(0.15f, horizontalSpeed * NESTED_BOUNDARY_MAX_VY_RATIO);
+        return MathHelper.clamp(-divergence * centeredY, -clamp, clamp);
+    }
+
     private short quantizeSignedToShort(float value, float range) {
         if (!(range > 0.0f) || !Float.isFinite(value)) {
             return 0;
@@ -7096,6 +7235,7 @@ public final class AeroServerRuntime {
     }
 
     private void sendFlowSnapshotToPlayer(ServerPlayerEntity player, MinecraftServer server) {
+        sendCoarseWindSnapshotToPlayer(player);
         PublishedFrame frame = publishedFrame.get();
         if (frame == null) {
             return;
@@ -7108,6 +7248,13 @@ public final class AeroServerRuntime {
                 player,
                 new AeroFlowPayload(dimId, atlas.origin(), PARTICLE_FLOW_SAMPLE_STRIDE, atlas.packed())
             );
+        }
+    }
+
+    private void sendCoarseWindSnapshotToPlayer(ServerPlayerEntity player) {
+        AeroCoarseWindPayload payload = buildCoarseWindPayloadForPlayer(player);
+        if (payload != null) {
+            ServerPlayNetworking.send(player, payload);
         }
     }
 
@@ -7265,6 +7412,65 @@ public final class AeroServerRuntime {
         }
     }
 
+    private void syncCoarseWindToPlayers(MinecraftServer server) {
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            sendCoarseWindSnapshotToPlayer(player);
+        }
+    }
+
+    private AeroCoarseWindPayload buildCoarseWindPayloadForPlayer(ServerPlayerEntity player) {
+        ServerWorld world = player.getEntityWorld();
+        if (world == null) {
+            return null;
+        }
+        BlockPos playerPos = player.getBlockPos();
+        int cellSize = COARSE_WIND_SYNC_CELL_SIZE_BLOCKS;
+        int originX = coarseWindOriginFor(playerPos.getX(), COARSE_WIND_SYNC_SIZE_X, cellSize);
+        int originY = coarseWindOriginFor(playerPos.getY(), COARSE_WIND_SYNC_SIZE_Y, cellSize);
+        int originZ = coarseWindOriginFor(playerPos.getZ(), COARSE_WIND_SYNC_SIZE_Z, cellSize);
+        BlockPos origin = new BlockPos(originX, originY, originZ);
+        short[] packed = new short[
+            COARSE_WIND_SYNC_SIZE_X
+                * COARSE_WIND_SYNC_SIZE_Y
+                * COARSE_WIND_SYNC_SIZE_Z
+                * NativeSimulationBridge.PACKED_ATLAS_CHANNELS
+        ];
+        synchronized (simulationStateLock) {
+            for (int x = 0; x < COARSE_WIND_SYNC_SIZE_X; x++) {
+                for (int y = 0; y < COARSE_WIND_SYNC_SIZE_Y; y++) {
+                    for (int z = 0; z < COARSE_WIND_SYNC_SIZE_Z; z++) {
+                        int dstCell = ((x * COARSE_WIND_SYNC_SIZE_Y) + y) * COARSE_WIND_SYNC_SIZE_Z + z;
+                        int dstBase = dstCell * NativeSimulationBridge.PACKED_ATLAS_CHANNELS;
+                        BlockPos samplePos = BlockPos.ofFloored(
+                            originX + (x + 0.5) * cellSize,
+                            originY + (y + 0.5) * cellSize,
+                            originZ + (z + 0.5) * cellSize
+                        );
+                        AeroWindSample sample = sampleCoarseWindLocked(world.getRegistryKey(), samplePos);
+                        packed[dstBase] = quantizeSignedToShort(sample.velocityX(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packed[dstBase + 1] = quantizeSignedToShort(sample.velocityY(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packed[dstBase + 2] = quantizeSignedToShort(sample.velocityZ(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packed[dstBase + 3] = quantizeSignedToShort(sample.pressure(), ATLAS_PRESSURE_QUANT_RANGE);
+                    }
+                }
+            }
+        }
+        return new AeroCoarseWindPayload(
+            world.getRegistryKey().getValue(),
+            origin,
+            cellSize,
+            COARSE_WIND_SYNC_SIZE_X,
+            COARSE_WIND_SYNC_SIZE_Y,
+            COARSE_WIND_SYNC_SIZE_Z,
+            tickCounter,
+            packed
+        );
+    }
+
+    private int coarseWindOriginFor(int blockCoord, int size, int cellSize) {
+        return Math.floorDiv(blockCoord, cellSize) * cellSize - (size / 2) * cellSize;
+    }
+
     private void syncAnalysisFlowToPlayers(MinecraftServer server, PublishedFrame frame) {
         Map<WindowKey, AeroFlowAnalysisPayload> payloadCache = new HashMap<>();
         Set<WindowKey> missingKeys = new HashSet<>();
@@ -7374,6 +7580,10 @@ public final class AeroServerRuntime {
         SampledPoint brickSample = sampleBrickRuntimePointLocked(worldKey, probePos);
         if (brickSample != null) {
             return brickSample;
+        }
+        SampledPoint coarseSample = sampleCoarsePointLocked(worldKey, probePos);
+        if (coarseSample != null) {
+            return coarseSample;
         }
         WindowKey key = new WindowKey(worldKey, windowOriginFromCoreOrigin(coreOriginForPosition(probePos)));
         RegionRecord region = regions.get(key);

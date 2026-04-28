@@ -3203,31 +3203,32 @@ AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_ensure_brick_world_runtime(
     return ensure_brick_world_runtime(*service, world_key, brick_size, dx_meters, dt_seconds) ? 1 : 0;
 }
 
-AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_active_hints(
+static int set_brick_world_active_hints_locked(
     long long service_key,
     long long world_key,
     int brick_size,
     const int* brick_coords,
-    int brick_count
+    int brick_count,
+    bool include_neighbor_closure,
+    const char* error_prefix
 ) {
-    std::lock_guard<SpinMutex> lock(g_simulation_mutex);
     ServiceState* service = lookup_service(service_key);
     if (!service) {
-        set_simulation_last_error("simulation_set_brick_world_active_hints: missing service");
+        set_simulation_last_error(std::string(error_prefix) + ": missing service");
         return 0;
     }
     if (brick_count < 0 || (brick_count > 0 && !brick_coords)) {
-        set_simulation_last_error("simulation_set_brick_world_active_hints: invalid hint payload");
+        set_simulation_last_error(std::string(error_prefix) + ": invalid hint payload");
         return 0;
     }
     auto runtime_iterator = service->brick_world_runtimes.find(world_key);
     if (runtime_iterator == service->brick_world_runtimes.end()) {
-        set_simulation_last_error("simulation_set_brick_world_active_hints: missing brick runtime");
+        set_simulation_last_error(std::string(error_prefix) + ": missing brick runtime");
         return 0;
     }
     FluidWorldRuntime& runtime = runtime_iterator->second;
     if (runtime.brick_size != brick_size) {
-        set_simulation_last_error("simulation_set_brick_world_active_hints: brick size mismatch");
+        set_simulation_last_error(std::string(error_prefix) + ": brick size mismatch");
         return 0;
     }
     for (auto& entry : runtime.bricks) {
@@ -3247,12 +3248,14 @@ AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_active_hints(
         brick.last_hint_epoch = runtime.epoch;
         brick.last_active_epoch = runtime.epoch;
         runtime.active_hint_closure.insert(coord);
-        runtime.active_hint_closure.insert(BrickCoord{coord.x - 1, coord.y, coord.z});
-        runtime.active_hint_closure.insert(BrickCoord{coord.x + 1, coord.y, coord.z});
-        runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y - 1, coord.z});
-        runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y + 1, coord.z});
-        runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y, coord.z - 1});
-        runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y, coord.z + 1});
+        if (include_neighbor_closure) {
+            runtime.active_hint_closure.insert(BrickCoord{coord.x - 1, coord.y, coord.z});
+            runtime.active_hint_closure.insert(BrickCoord{coord.x + 1, coord.y, coord.z});
+            runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y - 1, coord.z});
+            runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y + 1, coord.z});
+            runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y, coord.z - 1});
+            runtime.active_hint_closure.insert(BrickCoord{coord.x, coord.y, coord.z + 1});
+        }
     }
     for (const BrickCoord& coord : runtime.active_hint_closure) {
         runtime.bricks.try_emplace(coord);
@@ -3260,6 +3263,44 @@ AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_active_hints(
     recompute_runtime_active_flags(runtime);
     prune_inactive_bricks(runtime);
     return 1;
+}
+
+AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_active_hints(
+    long long service_key,
+    long long world_key,
+    int brick_size,
+    const int* brick_coords,
+    int brick_count
+) {
+    std::lock_guard<SpinMutex> lock(g_simulation_mutex);
+    return set_brick_world_active_hints_locked(
+        service_key,
+        world_key,
+        brick_size,
+        brick_coords,
+        brick_count,
+        true,
+        "simulation_set_brick_world_active_hints"
+    );
+}
+
+AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_exact_active_hints(
+    long long service_key,
+    long long world_key,
+    int brick_size,
+    const int* brick_coords,
+    int brick_count
+) {
+    std::lock_guard<SpinMutex> lock(g_simulation_mutex);
+    return set_brick_world_active_hints_locked(
+        service_key,
+        world_key,
+        brick_size,
+        brick_coords,
+        brick_count,
+        false,
+        "simulation_set_brick_world_exact_active_hints"
+    );
 }
 
 AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_get_brick_world_runtime_status(
@@ -5345,6 +5386,37 @@ JNIEXPORT jboolean JNICALL Java_com_aerodynamics4mc_runtime_NativeSimulationBrid
         return JNI_FALSE;
     }
     const int ok = aero_lbm_simulation_set_brick_world_active_hints(
+        static_cast<long long>(service_key),
+        static_cast<long long>(world_key),
+        brick_size,
+        reinterpret_cast<const int*>(coords_ptr),
+        brick_count
+    );
+    env->ReleaseIntArrayElements(brick_coords, coords_ptr, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL Java_com_aerodynamics4mc_runtime_NativeSimulationBridge_nativeSetBrickWorldExactActiveHints(
+    JNIEnv* env,
+    jclass,
+    jlong service_key,
+    jlong world_key,
+    jint brick_size,
+    jintArray brick_coords,
+    jint brick_count
+) {
+    if (!brick_coords) {
+        return JNI_FALSE;
+    }
+    if (brick_count < 0 || env->GetArrayLength(brick_coords) < brick_count * 3) {
+        return JNI_FALSE;
+    }
+    jboolean copy = JNI_FALSE;
+    jint* coords_ptr = env->GetIntArrayElements(brick_coords, &copy);
+    if (!coords_ptr) {
+        return JNI_FALSE;
+    }
+    const int ok = aero_lbm_simulation_set_brick_world_exact_active_hints(
         static_cast<long long>(service_key),
         static_cast<long long>(world_key),
         brick_size,

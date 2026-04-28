@@ -21,6 +21,9 @@ public record AeroFlowAnalysisPayload(
     byte[] residualVz,
     byte[] residualPressure
 ) implements CustomPayload {
+    private static final int MAX_PACKED_FLOW_SHORTS = 1_048_576;
+    private static final int MAX_RESIDUAL_BYTES = 4_194_304;
+
     public static final CustomPayload.Id<AeroFlowAnalysisPayload> ID =
         new CustomPayload.Id<>(Identifier.of(ModBlocks.MOD_ID, "flow_field_analysis"));
     public static final PacketCodec<RegistryByteBuf, AeroFlowAnalysisPayload> CODEC =
@@ -35,15 +38,18 @@ public record AeroFlowAnalysisPayload(
             buf.readFloat(),
             buf.readFloat(),
             readPackedFlow(buf),
-            buf.readByteArray(),
-            buf.readByteArray(),
-            buf.readByteArray(),
-            buf.readByteArray()
+            buf.readByteArray(MAX_RESIDUAL_BYTES),
+            buf.readByteArray(MAX_RESIDUAL_BYTES),
+            buf.readByteArray(MAX_RESIDUAL_BYTES),
+            buf.readByteArray(MAX_RESIDUAL_BYTES)
         );
     }
 
     private static short[] readPackedFlow(RegistryByteBuf buf) {
         int length = buf.readVarInt();
+        if (length < 0 || length > MAX_PACKED_FLOW_SHORTS) {
+            throw new IllegalArgumentException("Invalid flow analysis base length: " + length);
+        }
         short[] data = new short[length];
         for (int i = 0; i < length; i++) {
             data[i] = buf.readShort();

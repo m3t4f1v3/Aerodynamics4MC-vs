@@ -5,7 +5,10 @@ import java.util.Map;
 
 import org.joml.Matrix4f;
 
+import com.aerodynamics4mc.api.AeroWindSample;
+import com.aerodynamics4mc.api.SamplePolicy;
 import com.aerodynamics4mc.flow.AnalysisFlowCodec;
+import com.aerodynamics4mc.net.AeroCoarseWindPayload;
 import com.aerodynamics4mc.net.AeroFlowAnalysisPayload;
 import com.aerodynamics4mc.net.AeroFlowPayload;
 import com.aerodynamics4mc.runtime.NativeSimulationBridge;
@@ -35,7 +38,7 @@ final class AeroVisualizer {
     private static final int REGION_STALE_TICKS = 40;
     private static final int REMOTE_VECTOR_FIELD_STRIDE = 1;
     private static final int REMOTE_STREAMLINE_SEED_STRIDE = 1;
-    private static final int REMOTE_STREAMLINE_FACE_BUCKETS = 2;
+    private static final int REMOTE_STREAMLINE_FACE_BUCKETS = 1;
     private static final int REMOTE_STREAMLINE_SEEDS_PER_BUCKET = 5;
     private static final int REMOTE_STREAMLINE_SEEDS_PER_FACE =
         REMOTE_STREAMLINE_FACE_BUCKETS * REMOTE_STREAMLINE_FACE_BUCKETS * REMOTE_STREAMLINE_SEEDS_PER_BUCKET;
@@ -54,10 +57,12 @@ final class AeroVisualizer {
     private static final double ANALYSIS_SLICE_VIEW_OFFSET_Y = -1.25;
 
     private final Map<WindowKey, RemoteFlowField> remoteWindows = new HashMap<>();
+    private final Map<WindowKey, RemoteFlowField> localWindows = new HashMap<>();
+    private final Map<WindowKey, CoarseWindField> coarseWindFields = new HashMap<>();
     private final Map<WindowKey, AnalysisFlowField> analysisWindows = new HashMap<>();
     private final NativeSimulationBridge analysisCodecBridge = new NativeSimulationBridge();
     private boolean streamingEnabled;
-    private boolean renderVelocityVectors = true;
+    private boolean renderVelocityVectors = false;
     private boolean renderStreamlines = true;
     private long clientTickCounter;
 
@@ -73,6 +78,8 @@ final class AeroVisualizer {
         renderStreamlines = state.renderStreamlines();
         if (!streamingEnabled) {
             remoteWindows.clear();
+            localWindows.clear();
+            coarseWindFields.clear();
         }
     }
 
@@ -82,6 +89,36 @@ final class AeroVisualizer {
         }
         WindowKey key = new WindowKey(payload.dimensionId(), payload.origin());
         remoteWindows.put(key, RemoteFlowField.fromPayload(payload, clientTickCounter));
+    }
+
+    void onLocalFlowField(Identifier dimensionId, BlockPos origin, short[] packedFlow) {
+        if (!streamingEnabled || packedFlow == null || packedFlow.length == 0) {
+            return;
+        }
+        WindowKey key = new WindowKey(dimensionId, origin);
+        localWindows.put(
+            key,
+            RemoteFlowField.fromPacked(
+                dimensionId,
+                origin,
+                1,
+                packedFlow,
+                AeroWindSample.Authority.CLIENT_LOCAL,
+                clientTickCounter
+            )
+        );
+    }
+
+    void clearLocalFlowFields() {
+        localWindows.clear();
+    }
+
+    void onCoarseWindField(AeroCoarseWindPayload payload) {
+        if (!streamingEnabled) {
+            return;
+        }
+        WindowKey key = new WindowKey(payload.dimensionId(), payload.origin());
+        coarseWindFields.put(key, CoarseWindField.fromPayload(payload, clientTickCounter));
     }
 
     void onFlowAnalysis(AeroFlowAnalysisPayload payload) {
@@ -107,51 +144,101 @@ final class AeroVisualizer {
 
     void clearState() {
         remoteWindows.clear();
+        localWindows.clear();
+        coarseWindFields.clear();
         analysisWindows.clear();
         streamingEnabled = false;
         renderVelocityVectors = true;
         renderStreamlines = true;
     }
 
-    Vec3d sampleWind(Identifier dimensionId, Vec3d position) {
-        if (!streamingEnabled || remoteWindows.isEmpty()) {
-            return Vec3d.ZERO;
+    AeroWindSample sampleFlow(Identifier dimensionId, Vec3d position) {
+        return sampleFlow(dimensionId, position, SamplePolicy.VISUAL_LOCAL_FIRST);
+    }
+
+    AeroWindSample sampleFlow(Identifier dimensionId, Vec3d position, SamplePolicy policy) {
+        if (!streamingEnabled) {
+            return AeroWindSample.ZERO;
         }
-        Vec3d bestVisible = Vec3d.ZERO;
-        double bestVisibleSpeedSq = 0.0;
-        Vec3d bestFallback = Vec3d.ZERO;
-        double bestFallbackSpeedSq = 0.0;
-        for (RemoteFlowField field : remoteWindows.values()) {
+        SamplePolicy effectivePolicy = policy == null ? SamplePolicy.VISUAL_LOCAL_FIRST : policy;
+        RemoteFlowField l2Field = effectivePolicy.allowClientLocalL2()
+            ? findNewestField(localWindows, dimensionId, position)
+            : null;
+        if (l2Field != null) {
+            return l2Field.sampleFlowTrilinear(position);
+        }
+        l2Field = findNewestRemoteField(dimensionId, position);
+        if (l2Field != null) {
+            return l2Field.sampleFlowTrilinear(position);
+        }
+        if (!effectivePolicy.allowServerCoarse()) {
+            return AeroWindSample.ZERO;
+        }
+        CoarseWindField coarseField = findNewestCoarseField(dimensionId, position);
+        if (coarseField != null) {
+            return coarseField.sampleFlowTrilinear(position);
+        }
+        return AeroWindSample.ZERO;
+    }
+
+    AeroWindSample sampleServerCoarseFlow(Identifier dimensionId, Vec3d position) {
+        if (!streamingEnabled) {
+            return AeroWindSample.ZERO;
+        }
+        CoarseWindField coarseField = findNewestCoarseField(dimensionId, position);
+        return coarseField == null ? AeroWindSample.ZERO : coarseField.sampleFlowTrilinear(position);
+    }
+
+    Vec3d sampleWind(Identifier dimensionId, Vec3d position) {
+        return sampleFlow(dimensionId, position).velocity();
+    }
+
+    private RemoteFlowField findNewestRemoteField(Identifier dimensionId, Vec3d position) {
+        return findNewestField(remoteWindows, dimensionId, position);
+    }
+
+    private RemoteFlowField findNewestField(Map<WindowKey, RemoteFlowField> fields, Identifier dimensionId, Vec3d position) {
+        RemoteFlowField best = null;
+        long bestTick = Long.MIN_VALUE;
+        for (RemoteFlowField field : fields.values()) {
             if (!field.dimensionId().equals(dimensionId)) {
                 continue;
             }
-            if (field.visibleBox().contains(position)) {
-                Vec3d sampled = field.sampleVelocityTrilinear(position);
-                double speedSq = sampled.lengthSquared();
-                if (speedSq > bestVisibleSpeedSq) {
-                    bestVisible = sampled;
-                    bestVisibleSpeedSq = speedSq;
-                }
-                continue;
-            }
-            if (field.regionBox().contains(position)) {
-                Vec3d sampled = field.sampleVelocityTrilinear(position);
-                double speedSq = sampled.lengthSquared();
-                if (speedSq > bestFallbackSpeedSq) {
-                    bestFallback = sampled;
-                    bestFallbackSpeedSq = speedSq;
-                }
+            if (field.visibleBox().contains(position) && field.lastUpdatedTick() >= bestTick) {
+                best = field;
+                bestTick = field.lastUpdatedTick();
             }
         }
-        return bestVisibleSpeedSq > 0.0 ? bestVisible : bestFallback;
+        return best;
+    }
+
+    private CoarseWindField findNewestCoarseField(Identifier dimensionId, Vec3d position) {
+        CoarseWindField best = null;
+        long bestTick = Long.MIN_VALUE;
+        for (CoarseWindField field : coarseWindFields.values()) {
+            if (!field.dimensionId().equals(dimensionId)) {
+                continue;
+            }
+            if (field.regionBox().contains(position) && field.lastUpdatedTick() >= bestTick) {
+                best = field;
+                bestTick = field.lastUpdatedTick();
+            }
+        }
+        return best;
     }
 
     private void onClientTick() {
         clientTickCounter++;
-        if (!streamingEnabled || remoteWindows.isEmpty()) {
+        if (!streamingEnabled) {
             return;
         }
         remoteWindows.entrySet().removeIf(entry -> {
+            return clientTickCounter - entry.getValue().lastUpdatedTick() > REGION_STALE_TICKS;
+        });
+        localWindows.entrySet().removeIf(entry -> {
+            return clientTickCounter - entry.getValue().lastUpdatedTick() > REGION_STALE_TICKS;
+        });
+        coarseWindFields.entrySet().removeIf(entry -> {
             return clientTickCounter - entry.getValue().lastUpdatedTick() > REGION_STALE_TICKS;
         });
         analysisWindows.entrySet().removeIf(entry -> {
@@ -160,7 +247,7 @@ final class AeroVisualizer {
     }
 
     private void renderAtlasOverlay(WorldRenderContext context) {
-        if (!streamingEnabled || remoteWindows.isEmpty()) {
+        if (!streamingEnabled || (remoteWindows.isEmpty() && localWindows.isEmpty())) {
             return;
         }
         MinecraftClient client = MinecraftClient.getInstance();
@@ -172,8 +259,24 @@ final class AeroVisualizer {
         VertexConsumer lineBuffer = context.consumers() == null ? null : context.consumers().getBuffer(RenderLayers.lines());
         MatrixStack matrices = context.matrices();
         try (var ignored = client.newGizmoScope()) {
+            for (RemoteFlowField field : localWindows.values()) {
+                if (!field.dimensionId().equals(dimensionId)) {
+                    continue;
+                }
+                double distanceSq = field.visibleBox().squaredMagnitude(cameraPos);
+                if (distanceSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) {
+                    continue;
+                }
+                renderRegionOutline(field, distanceSq);
+                if (distanceSq <= REMOTE_VECTOR_RENDER_DISTANCE * REMOTE_VECTOR_RENDER_DISTANCE) {
+                    renderFlowRendererField(lineBuffer, matrices, field, cameraPos);
+                }
+            }
             for (RemoteFlowField field : remoteWindows.values()) {
                 if (!field.dimensionId().equals(dimensionId)) {
+                    continue;
+                }
+                if (localWindows.containsKey(new WindowKey(field.dimensionId(), field.origin()))) {
                     continue;
                 }
                 double distanceSq = field.visibleBox().squaredMagnitude(cameraPos);
@@ -505,7 +608,7 @@ final class AeroVisualizer {
                 )
                 .color(r, g, b, 255)
                 .normal(entry, (float) segDir.x, (float) segDir.y, (float) segDir.z)
-                .lineWidth(1.0f);
+                .lineWidth(3.0f);
             buffer.vertex(
                     matrix,
                     (float) (nextPos.x - cameraPos.x),
@@ -514,7 +617,7 @@ final class AeroVisualizer {
                 )
                 .color(r, g, b, 255)
                 .normal(entry, (float) segDir.x, (float) segDir.y, (float) segDir.z)
-                .lineWidth(1.0f);
+                .lineWidth(3.0f);
 
             pos = nextPos;
             currentField = nextField;
@@ -794,6 +897,65 @@ final class AeroVisualizer {
     private record FlowSample(Vec3d velocity, RemoteFlowField field) {
     }
 
+    private record PackedFlowSample(float velocityX, float velocityY, float velocityZ, float pressure) {
+        PackedFlowSample lerp(PackedFlowSample other, double t) {
+            float f = (float) t;
+            return new PackedFlowSample(
+                velocityX + (other.velocityX - velocityX) * f,
+                velocityY + (other.velocityY - velocityY) * f,
+                velocityZ + (other.velocityZ - velocityZ) * f,
+                pressure + (other.pressure - pressure) * f
+            );
+        }
+    }
+
+    private record CoarseWindField(
+        Identifier dimensionId,
+        BlockPos origin,
+        int cellSize,
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedFlow,
+        long lastUpdatedTick
+    ) {
+        static CoarseWindField fromPayload(AeroCoarseWindPayload payload, long lastUpdatedTick) {
+            return new CoarseWindField(
+                payload.dimensionId(),
+                payload.origin(),
+                Math.max(1, payload.cellSize()),
+                Math.max(1, payload.sizeX()),
+                Math.max(1, payload.sizeY()),
+                Math.max(1, payload.sizeZ()),
+                payload.packedFlow(),
+                lastUpdatedTick
+            );
+        }
+
+        AeroWindSample sampleFlowTrilinear(Vec3d position) {
+            return samplePackedFlow(
+                origin,
+                cellSize,
+                sizeX,
+                sizeY,
+                sizeZ,
+                packedFlow,
+                position,
+                AeroWindSample.Level.L1,
+                AeroWindSample.Authority.SERVER_AUTHORITATIVE
+            );
+        }
+
+        Box regionBox() {
+            return new Box(
+                origin.getX(), origin.getY(), origin.getZ(),
+                origin.getX() + (double) sizeX * cellSize,
+                origin.getY() + (double) sizeY * cellSize,
+                origin.getZ() + (double) sizeZ * cellSize
+            );
+        }
+    }
+
     private record RemoteFlowField(
         Identifier dimensionId,
         BlockPos origin,
@@ -801,19 +963,53 @@ final class AeroVisualizer {
         int atlasResolution,
         short[] packedFlow,
         FlowVisual visual,
+        AeroWindSample.Authority authority,
         long lastUpdatedTick
     ) {
         static RemoteFlowField fromPayload(AeroFlowPayload payload, long lastUpdatedTick) {
-            int sampleCount = payload.packedFlow().length / 4;
-            int atlasResolution = Math.max(1, Math.round((float) Math.cbrt(sampleCount)));
-            return new RemoteFlowField(
+            return fromPacked(
                 payload.dimensionId(),
                 payload.origin(),
                 payload.sampleStride(),
-                atlasResolution,
                 payload.packedFlow(),
-                FlowVisual.fromPackedFlow(payload.packedFlow()),
+                AeroWindSample.Authority.SERVER_AUTHORITATIVE,
                 lastUpdatedTick
+            );
+        }
+
+        static RemoteFlowField fromPacked(
+            Identifier dimensionId,
+            BlockPos origin,
+            int sampleStride,
+            short[] packedFlow,
+            AeroWindSample.Authority authority,
+            long lastUpdatedTick
+        ) {
+            int sampleCount = packedFlow.length / 4;
+            int atlasResolution = Math.max(1, Math.round((float) Math.cbrt(sampleCount)));
+            return new RemoteFlowField(
+                dimensionId,
+                origin,
+                sampleStride,
+                atlasResolution,
+                packedFlow,
+                FlowVisual.fromPackedFlow(packedFlow),
+                authority,
+                lastUpdatedTick
+            );
+        }
+
+        AeroWindSample sampleFlowTrilinear(Vec3d position) {
+            return samplePackedFlow(
+                origin,
+                sampleStride,
+                atlasResolution,
+                atlasResolution,
+                atlasResolution,
+                packedFlow,
+                position,
+                AeroWindSample.Level.L2,
+                authority
             );
         }
 
@@ -964,6 +1160,90 @@ final class AeroVisualizer {
             );
         }
 
+    }
+
+    private static AeroWindSample samplePackedFlow(
+        BlockPos origin,
+        int sampleStride,
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedFlow,
+        Vec3d position,
+        AeroWindSample.Level level,
+        AeroWindSample.Authority authority
+    ) {
+        double rx = (position.x - origin.getX()) / sampleStride;
+        double ry = (position.y - origin.getY()) / sampleStride;
+        double rz = (position.z - origin.getZ()) / sampleStride;
+        if (rx < 0.0 || ry < 0.0 || rz < 0.0
+            || rx >= sizeX || ry >= sizeY || rz >= sizeZ) {
+            return AeroWindSample.ZERO;
+        }
+        double lx = MathHelper.clamp(rx - 0.5, 0.0, sizeX - 1.0);
+        double ly = MathHelper.clamp(ry - 0.5, 0.0, sizeY - 1.0);
+        double lz = MathHelper.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
+        PackedFlowSample sample = samplePackedFlowAtSampleCoordinates(sizeX, sizeY, sizeZ, packedFlow, lx, ly, lz);
+        return new AeroWindSample(
+            sample.velocityX(),
+            sample.velocityY(),
+            sample.velocityZ(),
+            sample.pressure(),
+            level,
+            authority,
+            AeroWindSample.UNKNOWN_EPOCH,
+            AeroWindSample.UNKNOWN_EPOCH,
+            AeroWindSample.UNKNOWN_EPOCH,
+            1.0f
+        );
+    }
+
+    private static PackedFlowSample samplePackedFlowAtSampleCoordinates(
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedFlow,
+        double lx,
+        double ly,
+        double lz
+    ) {
+        int x0 = (int) Math.floor(lx);
+        int y0 = (int) Math.floor(ly);
+        int z0 = (int) Math.floor(lz);
+        int x1 = Math.min(sizeX - 1, x0 + 1);
+        int y1 = Math.min(sizeY - 1, y0 + 1);
+        int z1 = Math.min(sizeZ - 1, z0 + 1);
+        double fx = x1 == x0 ? 0.0 : lx - x0;
+        double fy = y1 == y0 ? 0.0 : ly - y0;
+        double fz = z1 == z0 ? 0.0 : lz - z0;
+        PackedFlowSample c000 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x0, y0, z0);
+        PackedFlowSample c100 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x1, y0, z0);
+        PackedFlowSample c010 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x0, y1, z0);
+        PackedFlowSample c110 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x1, y1, z0);
+        PackedFlowSample c001 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x0, y0, z1);
+        PackedFlowSample c101 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x1, y0, z1);
+        PackedFlowSample c011 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x0, y1, z1);
+        PackedFlowSample c111 = loadPackedFlow(sizeX, sizeY, sizeZ, packedFlow, x1, y1, z1);
+        PackedFlowSample c00 = c000.lerp(c100, fx);
+        PackedFlowSample c10 = c010.lerp(c110, fx);
+        PackedFlowSample c01 = c001.lerp(c101, fx);
+        PackedFlowSample c11 = c011.lerp(c111, fx);
+        PackedFlowSample c0 = c00.lerp(c10, fy);
+        PackedFlowSample c1 = c01.lerp(c11, fy);
+        return c0.lerp(c1, fz);
+    }
+
+    private static PackedFlowSample loadPackedFlow(int sizeX, int sizeY, int sizeZ, short[] packedFlow, int x, int y, int z) {
+        int cell = ((x * sizeY + y) * sizeZ + z) * 4;
+        if (cell < 0 || cell + 3 >= packedFlow.length) {
+            return new PackedFlowSample(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        return new PackedFlowSample(
+            decodeVelocity(packedFlow[cell]),
+            decodeVelocity(packedFlow[cell + 1]),
+            decodeVelocity(packedFlow[cell + 2]),
+            decodePressure(packedFlow[cell + 3])
+        );
     }
 
     private record FlowVisual(

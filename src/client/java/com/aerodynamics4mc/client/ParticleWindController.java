@@ -14,7 +14,7 @@ public final class ParticleWindController {
         if (wind.lengthSquared() < MIN_WIND_SPEED * MIN_WIND_SPEED) {
             return velocity;
         }
-        return applyHorizontalResponse(velocity, wind, 0.060, 0.42);
+        return applyHorizontalResponse(velocity, wind, 0.060, 0.21);
     }
 
     public static Vec3d applyCampfireSmoke(ClientWorld world, double x, double y, double z, Vec3d velocity) {
@@ -47,7 +47,7 @@ public final class ParticleWindController {
     }
 
     private static Vec3d sampleWind(ClientWorld world, double x, double y, double z) {
-        return AeroClientMod.sampleWind(world, new Vec3d(x, y, z));
+        return AeroClientMod.sampleFlow(world, new Vec3d(x, y, z)).velocity();
     }
 
     private static Vec3d applyHorizontalResponse(Vec3d velocity, Vec3d wind, double response, double maxHorizontalSpeed) {

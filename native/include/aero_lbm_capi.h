@@ -293,6 +293,13 @@ AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_active_hints(
     const int* brick_coords,
     int brick_count
 );
+AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_set_brick_world_exact_active_hints(
+    long long service_key,
+    long long world_key,
+    int brick_size,
+    const int* brick_coords,
+    int brick_count
+);
 AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_get_brick_world_runtime_status(
     long long service_key,
     long long world_key,

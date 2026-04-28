@@ -1,6 +1,7 @@
 package com.aerodynamics4mc.client;
 
 import java.lang.reflect.Method;
+import java.util.Arrays;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,11 +40,18 @@ final class IrisWindBridge {
     static final float MAX_BEND_MAGNITUDE = 1.2f;
     static final float MAX_BEND_VELOCITY_PER_TICK = 0.30f;
 
+    private static boolean irisReflectionInitialized;
+    private static Object irisApiInstance;
+    private static Method irisShaderPackInUseMethod;
+
     private final AeroVisualizer visualizer;
     private NativeImageBackedTexture windTexture;
     private float[] targetWindField;
     private float[] bendField;
     private float[] bendVelocityField;
+    private float[] shiftWindBuffer;
+    private float[] shiftBendBuffer;
+    private float[] shiftVelocityBuffer;
     private boolean dirty = true;
     private boolean streamingEnabled;
     private long lastAnchorX = Long.MIN_VALUE;
@@ -156,7 +164,6 @@ final class IrisWindBridge {
         if (windTexture == null || windTexture.getImage() == null || client.world == null) {
             return new RefreshStats(0, 0.0, 0.0);
         }
-        Identifier dimensionId = client.world.getRegistryKey().getValue();
         ensureStateArrays();
         if (anchorChanged) {
             shiftStateFields(originX, originY, originZ);
@@ -173,7 +180,7 @@ final class IrisWindBridge {
                     double worldY = originY + (y + 0.5) * CELL_SIZE_BLOCKS;
                     double worldZ = originZ + (z + 0.5) * CELL_SIZE_BLOCKS;
                     Vec3d sampledWind = streamingEnabled
-                        ? visualizer.sampleWind(dimensionId, new Vec3d(worldX, worldY, worldZ))
+                        ? AeroClientMod.sampleFlow(client.world, new Vec3d(worldX, worldY, worldZ)).velocity()
                         : Vec3d.ZERO;
                     targetWindField[windBase] = (float) sampledWind.x;
                     targetWindField[windBase + 1] = (float) sampledWind.y;
@@ -231,14 +238,15 @@ final class IrisWindBridge {
             return;
         }
         if (Math.abs(deltaX) >= GRID_X || Math.abs(deltaY) >= GRID_Y || Math.abs(deltaZ) >= GRID_Z) {
-            java.util.Arrays.fill(targetWindField, 0.0f);
-            java.util.Arrays.fill(bendField, 0.0f);
-            java.util.Arrays.fill(bendVelocityField, 0.0f);
+            Arrays.fill(targetWindField, 0.0f);
+            Arrays.fill(bendField, 0.0f);
+            Arrays.fill(bendVelocityField, 0.0f);
             return;
         }
-        float[] shiftedWind = new float[targetWindField.length];
-        float[] shiftedBend = new float[bendField.length];
-        float[] shiftedVelocity = new float[bendVelocityField.length];
+        ensureShiftBuffers();
+        Arrays.fill(shiftWindBuffer, 0.0f);
+        Arrays.fill(shiftBendBuffer, 0.0f);
+        Arrays.fill(shiftVelocityBuffer, 0.0f);
         for (int y = 0; y < GRID_Y; y++) {
             for (int z = 0; z < GRID_Z; z++) {
                 for (int x = 0; x < GRID_X; x++) {
@@ -250,22 +258,40 @@ final class IrisWindBridge {
                     }
                     int targetWindBase = cellIndex(x, y, z) * 3;
                     int sourceWindBase = cellIndex(sourceX, sourceY, sourceZ) * 3;
-                    shiftedWind[targetWindBase] = targetWindField[sourceWindBase];
-                    shiftedWind[targetWindBase + 1] = targetWindField[sourceWindBase + 1];
-                    shiftedWind[targetWindBase + 2] = targetWindField[sourceWindBase + 2];
+                    shiftWindBuffer[targetWindBase] = targetWindField[sourceWindBase];
+                    shiftWindBuffer[targetWindBase + 1] = targetWindField[sourceWindBase + 1];
+                    shiftWindBuffer[targetWindBase + 2] = targetWindField[sourceWindBase + 2];
 
                     int targetBendBase = cellIndex(x, y, z) * 2;
                     int sourceBendBase = cellIndex(sourceX, sourceY, sourceZ) * 2;
-                    shiftedBend[targetBendBase] = bendField[sourceBendBase];
-                    shiftedBend[targetBendBase + 1] = bendField[sourceBendBase + 1];
-                    shiftedVelocity[targetBendBase] = bendVelocityField[sourceBendBase];
-                    shiftedVelocity[targetBendBase + 1] = bendVelocityField[sourceBendBase + 1];
+                    shiftBendBuffer[targetBendBase] = bendField[sourceBendBase];
+                    shiftBendBuffer[targetBendBase + 1] = bendField[sourceBendBase + 1];
+                    shiftVelocityBuffer[targetBendBase] = bendVelocityField[sourceBendBase];
+                    shiftVelocityBuffer[targetBendBase + 1] = bendVelocityField[sourceBendBase + 1];
                 }
             }
         }
-        targetWindField = shiftedWind;
-        bendField = shiftedBend;
-        bendVelocityField = shiftedVelocity;
+        float[] oldWind = targetWindField;
+        targetWindField = shiftWindBuffer;
+        shiftWindBuffer = oldWind;
+        float[] oldBend = bendField;
+        bendField = shiftBendBuffer;
+        shiftBendBuffer = oldBend;
+        float[] oldVelocity = bendVelocityField;
+        bendVelocityField = shiftVelocityBuffer;
+        shiftVelocityBuffer = oldVelocity;
+    }
+
+    private void ensureShiftBuffers() {
+        if (shiftWindBuffer == null || shiftWindBuffer.length != targetWindField.length) {
+            shiftWindBuffer = new float[targetWindField.length];
+        }
+        if (shiftBendBuffer == null || shiftBendBuffer.length != bendField.length) {
+            shiftBendBuffer = new float[bendField.length];
+        }
+        if (shiftVelocityBuffer == null || shiftVelocityBuffer.length != bendVelocityField.length) {
+            shiftVelocityBuffer = new float[bendVelocityField.length];
+        }
     }
 
     private void integrateBendField(float deltaTicks) {
@@ -326,13 +352,13 @@ final class IrisWindBridge {
         image.fillRect(0, 0, TEXTURE_WIDTH, TEXTURE_HEIGHT, 0x00000000);
         windTexture.upload();
         if (targetWindField != null) {
-            java.util.Arrays.fill(targetWindField, 0.0f);
+            Arrays.fill(targetWindField, 0.0f);
         }
         if (bendField != null) {
-            java.util.Arrays.fill(bendField, 0.0f);
+            Arrays.fill(bendField, 0.0f);
         }
         if (bendVelocityField != null) {
-            java.util.Arrays.fill(bendVelocityField, 0.0f);
+            Arrays.fill(bendVelocityField, 0.0f);
         }
     }
 
@@ -357,6 +383,12 @@ final class IrisWindBridge {
             windTexture.close();
             windTexture = null;
         }
+        targetWindField = null;
+        bendField = null;
+        bendVelocityField = null;
+        shiftWindBuffer = null;
+        shiftBendBuffer = null;
+        shiftVelocityBuffer = null;
     }
 
     private static int flattenX(int x, int z) {
@@ -396,13 +428,22 @@ final class IrisWindBridge {
     @SuppressWarnings("unused")
     private static boolean isShaderPackInUseReflective() {
         try {
-            Class<?> irisApiClass = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
-            Method getInstance = irisApiClass.getMethod("getInstance");
-            Object api = getInstance.invoke(null);
-            Method isShaderPackInUse = irisApiClass.getMethod("isShaderPackInUse");
-            Object result = isShaderPackInUse.invoke(api);
+            if (!irisReflectionInitialized) {
+                Class<?> irisApiClass = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
+                Method getInstance = irisApiClass.getMethod("getInstance");
+                irisApiInstance = getInstance.invoke(null);
+                irisShaderPackInUseMethod = irisApiClass.getMethod("isShaderPackInUse");
+                irisReflectionInitialized = true;
+            }
+            if (irisApiInstance == null || irisShaderPackInUseMethod == null) {
+                return false;
+            }
+            Object result = irisShaderPackInUseMethod.invoke(irisApiInstance);
             return result instanceof Boolean bool && bool;
         } catch (Throwable ignored) {
+            irisReflectionInitialized = true;
+            irisApiInstance = null;
+            irisShaderPackInUseMethod = null;
             return false;
         }
     }
