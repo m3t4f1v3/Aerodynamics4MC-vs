@@ -47,7 +47,7 @@ public final class ParticleWindController {
     }
 
     private static Vec3d sampleWind(ClientWorld world, double x, double y, double z) {
-        return AeroClientMod.sampleFlow(world, new Vec3d(x, y, z)).velocity();
+        return AeroClientMod.sampleFlow(world, new Vec3d(x, y, z)).velocityWithGust();
     }
 
     private static Vec3d applyHorizontalResponse(Vec3d velocity, Vec3d wind, double response, double maxHorizontalSpeed) {

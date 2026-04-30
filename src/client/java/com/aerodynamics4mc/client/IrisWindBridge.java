@@ -34,6 +34,7 @@ final class IrisWindBridge {
     static final int TEXTURE_WIDTH = GRID_X * GRID_Z;
     static final int TEXTURE_HEIGHT = GRID_Y;
     static final int REFRESH_INTERVAL_TICKS = 5;
+    private static final int TARGET_REFRESH_CELLS_PER_TICK = 4096;
     static final float SPRING_STIFFNESS = 0.18f;
     static final float SPRING_DAMPING = 0.12f;
     static final float WIND_TO_BEND_SCALE = 9.6f;
@@ -54,10 +55,19 @@ final class IrisWindBridge {
     private float[] shiftVelocityBuffer;
     private boolean dirty = true;
     private boolean streamingEnabled;
+    private boolean targetRefreshInProgress;
+    private long targetRefreshOriginX;
+    private long targetRefreshOriginY;
+    private long targetRefreshOriginZ;
+    private int targetRefreshCursor;
+    private int targetRefreshNonZeroCells;
+    private double targetRefreshMaxSpeed;
+    private double targetRefreshTotalSpeed;
     private long lastAnchorX = Long.MIN_VALUE;
     private long lastAnchorY = Long.MIN_VALUE;
     private long lastAnchorZ = Long.MIN_VALUE;
     private long lastUploadTick = Long.MIN_VALUE;
+    private long lastTextureUploadTick = Long.MIN_VALUE;
     private long lastDiagnosticTick = Long.MIN_VALUE;
     private boolean loggedMissingIris;
     private boolean loggedInactiveShaderpack;
@@ -124,6 +134,9 @@ final class IrisWindBridge {
             return;
         }
         RefreshStats stats = refreshTargetWindField(client, anchorX, anchorY, anchorZ, anchorChanged);
+        if (!stats.complete()) {
+            return;
+        }
         lastAnchorX = anchorX;
         lastAnchorY = anchorY;
         lastAnchorZ = anchorZ;
@@ -133,9 +146,9 @@ final class IrisWindBridge {
             LOGGER.info(
                 "Iris wind refresh: streaming={} nonZeroCells={} maxSpeed={} meanSpeed={} origin=({}, {}, {})",
                 streamingEnabled,
-                stats.nonZeroCells,
-                String.format("%.3f", stats.maxSpeed),
-                String.format("%.3f", stats.meanSpeed),
+                stats.nonZeroCells(),
+                String.format("%.3f", stats.maxSpeed()),
+                String.format("%.3f", stats.meanSpeed()),
                 anchorX,
                 anchorY,
                 anchorZ
@@ -155,49 +168,80 @@ final class IrisWindBridge {
         if (!FabricLoader.getInstance().isModLoaded("iris") || !isShaderPackInUseReflective()) {
             return;
         }
+        long gameTime = client.world.getTime();
+        if (lastTextureUploadTick == gameTime) {
+            return;
+        }
         float deltaTicks = MathHelper.clamp(client.getRenderTickCounter().getDynamicDeltaTicks(), 0.05f, 1.5f);
         integrateBendField(deltaTicks);
         uploadBendTexture();
+        lastTextureUploadTick = gameTime;
     }
 
     private RefreshStats refreshTargetWindField(MinecraftClient client, long originX, long originY, long originZ, boolean anchorChanged) {
         if (windTexture == null || windTexture.getImage() == null || client.world == null) {
-            return new RefreshStats(0, 0.0, 0.0);
+            return new RefreshStats(0, 0.0, 0.0, true);
         }
         ensureStateArrays();
-        if (anchorChanged) {
+        if (anchorChanged && !targetRefreshInProgress) {
             shiftStateFields(originX, originY, originZ);
         }
-        int nonZeroCells = 0;
-        double maxSpeed = 0.0;
-        double totalSpeed = 0.0;
-        for (int y = 0; y < GRID_Y; y++) {
-            for (int z = 0; z < GRID_Z; z++) {
-                for (int x = 0; x < GRID_X; x++) {
-                    int cell = cellIndex(x, y, z);
-                    int windBase = cell * 3;
-                    double worldX = originX + (x + 0.5) * CELL_SIZE_BLOCKS;
-                    double worldY = originY + (y + 0.5) * CELL_SIZE_BLOCKS;
-                    double worldZ = originZ + (z + 0.5) * CELL_SIZE_BLOCKS;
-                    Vec3d sampledWind = streamingEnabled
-                        ? AeroClientMod.sampleFlow(client.world, new Vec3d(worldX, worldY, worldZ)).velocity()
-                        : Vec3d.ZERO;
-                    targetWindField[windBase] = (float) sampledWind.x;
-                    targetWindField[windBase + 1] = (float) sampledWind.y;
-                    targetWindField[windBase + 2] = (float) sampledWind.z;
-                    double speed = sampledWind.length();
-                    if (speed > 0.01) {
-                        nonZeroCells++;
-                        totalSpeed += speed;
-                        if (speed > maxSpeed) {
-                            maxSpeed = speed;
-                        }
-                    }
+        if (!targetRefreshInProgress
+            || targetRefreshOriginX != originX
+            || targetRefreshOriginY != originY
+            || targetRefreshOriginZ != originZ) {
+            beginTargetRefresh(originX, originY, originZ);
+        }
+
+        int cellCount = GRID_X * GRID_Y * GRID_Z;
+        int end = Math.min(cellCount, targetRefreshCursor + TARGET_REFRESH_CELLS_PER_TICK);
+        while (targetRefreshCursor < end) {
+            int cell = targetRefreshCursor++;
+            int x = cell % GRID_X;
+            int yz = cell / GRID_X;
+            int z = yz % GRID_Z;
+            int y = yz / GRID_Z;
+            int windBase = cell * 3;
+            double worldX = originX + (x + 0.5) * CELL_SIZE_BLOCKS;
+            double worldY = originY + (y + 0.5) * CELL_SIZE_BLOCKS;
+            double worldZ = originZ + (z + 0.5) * CELL_SIZE_BLOCKS;
+            Vec3d sampledWind = streamingEnabled
+                ? AeroClientMod.sampleFlow(client.world, new Vec3d(worldX, worldY, worldZ)).velocityWithGust()
+                : Vec3d.ZERO;
+            targetWindField[windBase] = (float) sampledWind.x;
+            targetWindField[windBase + 1] = (float) sampledWind.y;
+            targetWindField[windBase + 2] = (float) sampledWind.z;
+            double speed = sampledWind.length();
+            if (speed > 0.01) {
+                targetRefreshNonZeroCells++;
+                targetRefreshTotalSpeed += speed;
+                if (speed > targetRefreshMaxSpeed) {
+                    targetRefreshMaxSpeed = speed;
                 }
             }
         }
-        double meanSpeed = nonZeroCells > 0 ? totalSpeed / nonZeroCells : 0.0;
-        return new RefreshStats(nonZeroCells, maxSpeed, meanSpeed);
+
+        if (targetRefreshCursor < cellCount) {
+            return new RefreshStats(targetRefreshNonZeroCells, targetRefreshMaxSpeed, meanSpeed(), false);
+        }
+        RefreshStats stats = new RefreshStats(targetRefreshNonZeroCells, targetRefreshMaxSpeed, meanSpeed(), true);
+        targetRefreshInProgress = false;
+        return stats;
+    }
+
+    private void beginTargetRefresh(long originX, long originY, long originZ) {
+        targetRefreshInProgress = true;
+        targetRefreshOriginX = originX;
+        targetRefreshOriginY = originY;
+        targetRefreshOriginZ = originZ;
+        targetRefreshCursor = 0;
+        targetRefreshNonZeroCells = 0;
+        targetRefreshMaxSpeed = 0.0;
+        targetRefreshTotalSpeed = 0.0;
+    }
+
+    private double meanSpeed() {
+        return targetRefreshNonZeroCells > 0 ? targetRefreshTotalSpeed / targetRefreshNonZeroCells : 0.0;
     }
 
     private void ensureTexture(TextureManager textureManager) {
@@ -336,8 +380,7 @@ final class IrisWindBridge {
             for (int z = 0; z < GRID_Z; z++) {
                 for (int x = 0; x < GRID_X; x++) {
                     int bendBase = cellIndex(x, y, z) * 2;
-                    Vec3d bend = new Vec3d(bendField[bendBase], 0.0, bendField[bendBase + 1]);
-                    image.setColorArgb(flattenX(x, z), y, encodeWind(bend));
+                    image.setColorArgb(flattenX(x, z), y, encodeWind(bendField[bendBase], 0.0f, bendField[bendBase + 1]));
                 }
             }
         }
@@ -369,7 +412,10 @@ final class IrisWindBridge {
         lastAnchorY = Long.MIN_VALUE;
         lastAnchorZ = Long.MIN_VALUE;
         lastUploadTick = Long.MIN_VALUE;
+        lastTextureUploadTick = Long.MIN_VALUE;
         lastDiagnosticTick = Long.MIN_VALUE;
+        targetRefreshInProgress = false;
+        targetRefreshCursor = 0;
         zeroTexture();
     }
 
@@ -406,11 +452,11 @@ final class IrisWindBridge {
         return (long) aligned - halfExtentBlocks;
     }
 
-    private static int encodeWind(Vec3d wind) {
-        float wx = MathHelper.clamp((float) wind.x, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float wy = MathHelper.clamp((float) wind.y, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float wz = MathHelper.clamp((float) wind.z, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float magnitude = MathHelper.clamp((float) wind.length() / ENCODED_MAX_WIND_MPS, 0.0f, 1.0f);
+    private static int encodeWind(float windX, float windY, float windZ) {
+        float wx = MathHelper.clamp(windX, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float wy = MathHelper.clamp(windY, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float wz = MathHelper.clamp(windZ, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float magnitude = MathHelper.clamp((float) Math.sqrt(wx * wx + wy * wy + wz * wz) / ENCODED_MAX_WIND_MPS, 0.0f, 1.0f);
         int a = Math.round(magnitude * 255.0f);
         int r = encodeSigned(wx);
         int g = encodeSigned(wy);
@@ -423,7 +469,7 @@ final class IrisWindBridge {
         return Math.round((MathHelper.clamp(normalized, -1.0f, 1.0f) * 0.5f + 0.5f) * 255.0f);
     }
 
-    private record RefreshStats(int nonZeroCells, double maxSpeed, double meanSpeed) {}
+    private record RefreshStats(int nonZeroCells, double maxSpeed, double meanSpeed, boolean complete) {}
 
     @SuppressWarnings("unused")
     private static boolean isShaderPackInUseReflective() {

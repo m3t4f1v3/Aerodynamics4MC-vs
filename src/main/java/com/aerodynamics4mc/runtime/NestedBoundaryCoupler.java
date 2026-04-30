@@ -10,7 +10,8 @@ final class NestedBoundaryCoupler {
             0.0f,
             sample.backgroundWindZ(),
             sample.ambientAirTemperatureKelvin(),
-            sample.deepGroundTemperatureKelvin()
+            sample.deepGroundTemperatureKelvin(),
+            false
         );
     }
 
@@ -23,7 +24,8 @@ final class NestedBoundaryCoupler {
             sample.windY(),
             sample.windZ(),
             sample.ambientAirTemperatureKelvin(),
-            sample.deepGroundTemperatureKelvin()
+            sample.deepGroundTemperatureKelvin(),
+            true
         );
     }
 
@@ -74,7 +76,17 @@ final class NestedBoundaryCoupler {
         float windY,
         float windZ,
         float ambientAirTemperatureKelvin,
-        float deepGroundTemperatureKelvin
+        float deepGroundTemperatureKelvin,
+        boolean verticalWindAvailable
     ) {
+        BoundarySample(
+            float windX,
+            float windY,
+            float windZ,
+            float ambientAirTemperatureKelvin,
+            float deepGroundTemperatureKelvin
+        ) {
+            this(windX, windY, windZ, ambientAirTemperatureKelvin, deepGroundTemperatureKelvin, false);
+        }
     }
 }

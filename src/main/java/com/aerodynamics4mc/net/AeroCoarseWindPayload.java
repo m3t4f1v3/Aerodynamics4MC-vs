@@ -16,9 +16,11 @@ public record AeroCoarseWindPayload(
     int sizeY,
     int sizeZ,
     long serverTick,
-    short[] packedFlow
+    short[] packedFlow,
+    short[] packedAtmosphere
 ) implements CustomPayload {
     private static final int MAX_PACKED_FLOW_SHORTS = 1_048_576;
+    private static final int MAX_PACKED_ATMOSPHERE_SHORTS = 1_048_576;
 
     public static final CustomPayload.Id<AeroCoarseWindPayload> ID =
         new CustomPayload.Id<>(Identifier.of(ModBlocks.MOD_ID, "coarse_wind"));
@@ -34,14 +36,15 @@ public record AeroCoarseWindPayload(
             buf.readVarInt(),
             buf.readVarInt(),
             buf.readVarLong(),
-            readPackedFlow(buf)
+            readShortArray(buf, MAX_PACKED_FLOW_SHORTS, "coarse wind payload"),
+            readShortArray(buf, MAX_PACKED_ATMOSPHERE_SHORTS, "coarse atmosphere payload")
         );
     }
 
-    private static short[] readPackedFlow(RegistryByteBuf buf) {
+    private static short[] readShortArray(RegistryByteBuf buf, int maxLength, String label) {
         int length = buf.readVarInt();
-        if (length < 0 || length > MAX_PACKED_FLOW_SHORTS) {
-            throw new IllegalArgumentException("Invalid coarse wind payload length: " + length);
+        if (length < 0 || length > maxLength) {
+            throw new IllegalArgumentException("Invalid " + label + " length: " + length);
         }
         short[] data = new short[length];
         for (int i = 0; i < length; i++) {
@@ -58,8 +61,14 @@ public record AeroCoarseWindPayload(
         buf.writeVarInt(sizeY);
         buf.writeVarInt(sizeZ);
         buf.writeVarLong(serverTick);
-        buf.writeVarInt(packedFlow.length);
-        for (short v : packedFlow) {
+        writeShortArray(buf, packedFlow);
+        writeShortArray(buf, packedAtmosphere);
+    }
+
+    private static void writeShortArray(RegistryByteBuf buf, short[] values) {
+        short[] safeValues = values == null ? new short[0] : values;
+        buf.writeVarInt(safeValues.length);
+        for (short v : safeValues) {
             buf.writeShort(v);
         }
     }

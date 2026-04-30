@@ -17,6 +17,9 @@ final class MesoscaleGrid implements AutoCloseable {
     private static final float ABL_NEUTRAL_HEIGHT_BLOCKS = 280.0f;
     private static final float ABL_UNSTABLE_HEIGHT_BLOCKS = 460.0f;
     private static final float ABL_STABILITY_DELTA_K = 8.0f;
+    private static final float ABL_EKMAN_MAX_TURN_RADIANS = 0.52f;
+    private static final float ABL_MIN_ROUGHNESS_METERS = 0.02f;
+    private static final float ABL_MAX_ROUGHNESS_METERS = 8.0f;
     private static final float MIN_ALOFT_WIND_SPEED_MPS = 0.05f;
     private static final float L1_TERRAIN_SLOPE_REFERENCE = 0.18f;
     private static final float L1_TERRAIN_FORM_DRAG = 0.45f;
@@ -76,6 +79,7 @@ final class MesoscaleGrid implements AutoCloseable {
     private long nativeContextKey;
     private float[] forcingBuffer = new float[0];
     private float[] stateBuffer = new float[0];
+    private volatile ReadState readState = ReadState.EMPTY;
     private int centerCellX;
     private int centerCellZ;
     private int activeLayers = 1;
@@ -160,46 +164,28 @@ final class MesoscaleGrid implements AutoCloseable {
                 it.remove();
             }
         }
+        if (forcingRebuildDue) {
+            publishReadState();
+        }
     }
 
-    synchronized Sample sample(BlockPos pos) {
-        int cellX = Math.floorDiv(pos.getX(), cellSizeBlocks);
-        int cellZ = Math.floorDiv(pos.getZ(), cellSizeBlocks);
-        CellColumnState state = cells.get(pack(cellX, cellZ));
-        if (state == null) {
-            return null;
-        }
-        int layer = layerIndexForY(pos.getY());
-        if (layer < 0 || layer >= state.layerCount()) {
-            return null;
-        }
-        return new Sample(
-            state.terrainHeightBlocks,
-            state.biomeTemperature,
-            state.ambientAirTemperatureKelvin[layer],
-            state.deepGroundTemperatureKelvin[layer],
-            state.surfaceTemperatureKelvin[layer],
-            state.roughnessLengthMeters,
-            state.windX[layer],
-            state.windY[layer],
-            state.windZ[layer],
-            state.humidity[layer],
-            state.surfaceClass
-        );
+    Sample sample(BlockPos pos) {
+        return readState.sample(pos);
     }
 
-    synchronized boolean seedL2Window(
+    boolean seedL2Window(
         BlockPos origin,
         int sizeX,
         int sizeY,
         int sizeZ,
         float[] outWindX,
+        float[] outWindY,
         float[] outWindZ,
         float[] outAirTemperature,
         float[] outSurfaceTemperature
     ) {
-        if (cells.isEmpty()
-            || activeLayers <= 0
+        ReadState state = readState;
+        if (state.empty()
             || sizeX <= 0
             || sizeY <= 0
             || sizeZ <= 0) {
@@ -207,27 +193,29 @@ final class MesoscaleGrid implements AutoCloseable {
         }
         int cellsCount = sizeX * sizeY * sizeZ;
         if (outWindX == null
+            || outWindY == null
             || outWindZ == null
             || outAirTemperature == null
             || outSurfaceTemperature == null
             || outWindX.length != cellsCount
+            || outWindY.length != cellsCount
             || outWindZ.length != cellsCount
             || outAirTemperature.length != cellsCount
             || outSurfaceTemperature.length != cellsCount) {
             return false;
         }
 
-        int minCellX = centerCellX - radiusCells;
-        int maxCellX = centerCellX + radiusCells;
-        int minCellZ = centerCellZ - radiusCells;
-        int maxCellZ = centerCellZ + radiusCells;
+        int minCellX = state.centerCellX() - state.radiusCells();
+        int maxCellX = state.centerCellX() + state.radiusCells();
+        int minCellZ = state.centerCellZ() - state.radiusCells();
+        int maxCellZ = state.centerCellZ() + state.radiusCells();
 
         int[] lowerCellX = new int[sizeX];
         int[] upperCellX = new int[sizeX];
         float[] cellBlendX = new float[sizeX];
         for (int x = 0; x < sizeX; x++) {
             double worldX = origin.getX() + x + 0.5;
-            double cellCoord = (worldX - cellSizeBlocks * 0.5) / cellSizeBlocks;
+            double cellCoord = (worldX - state.cellSizeBlocks() * 0.5) / state.cellSizeBlocks();
             int lower = MathHelper.floor(cellCoord);
             int upper = lower + 1;
             float blend = (float) (cellCoord - lower);
@@ -246,7 +234,7 @@ final class MesoscaleGrid implements AutoCloseable {
         float[] cellBlendZ = new float[sizeZ];
         for (int z = 0; z < sizeZ; z++) {
             double worldZ = origin.getZ() + z + 0.5;
-            double cellCoord = (worldZ - cellSizeBlocks * 0.5) / cellSizeBlocks;
+            double cellCoord = (worldZ - state.cellSizeBlocks() * 0.5) / state.cellSizeBlocks();
             int lower = MathHelper.floor(cellCoord);
             int upper = lower + 1;
             float blend = (float) (cellCoord - lower);
@@ -269,92 +257,110 @@ final class MesoscaleGrid implements AutoCloseable {
                 int z1 = upperCellZ[z];
                 float tz = cellBlendZ[z];
 
-                CellColumnState c00 = columnStateAtClamped(x0, z0);
-                CellColumnState c10 = columnStateAtClamped(x1, z0);
-                CellColumnState c01 = columnStateAtClamped(x0, z1);
-                CellColumnState c11 = columnStateAtClamped(x1, z1);
-                if (c00 == null || c10 == null || c01 == null || c11 == null) {
+                int c00 = state.columnIndexAtClamped(x0, z0);
+                int c10 = state.columnIndexAtClamped(x1, z0);
+                int c01 = state.columnIndexAtClamped(x0, z1);
+                int c11 = state.columnIndexAtClamped(x1, z1);
+                if (c00 < 0 || c10 < 0 || c01 < 0 || c11 < 0) {
                     return false;
                 }
                 for (int y = 0; y < sizeY; y++) {
                     double worldY = origin.getY() + y + 0.5;
-                    double layerCoord = (worldY - (verticalBaseY + layerHeightBlocks * 0.5)) / layerHeightBlocks;
+                    double layerCoord = (worldY - (state.verticalBaseY() + state.layerHeightBlocks() * 0.5))
+                        / state.layerHeightBlocks();
                     int layer0 = MathHelper.floor(layerCoord);
                     int layer1 = layer0 + 1;
                     float ty = (float) (layerCoord - layer0);
-                    layer0 = MathHelper.clamp(layer0, 0, activeLayers - 1);
-                    layer1 = MathHelper.clamp(layer1, 0, activeLayers - 1);
+                    layer0 = MathHelper.clamp(layer0, 0, state.activeLayers() - 1);
+                    layer1 = MathHelper.clamp(layer1, 0, state.activeLayers() - 1);
                     if (layer0 == layer1) {
                         ty = 0.0f;
                     }
                     int cell = (x * sizeY + y) * sizeZ + z;
 
                     float windX0 = bilerp(
-                        c00.windX[layer0],
-                        c10.windX[layer0],
-                        c01.windX[layer0],
-                        c11.windX[layer0],
+                        state.windXAt(c00, layer0),
+                        state.windXAt(c10, layer0),
+                        state.windXAt(c01, layer0),
+                        state.windXAt(c11, layer0),
                         tx,
                         tz
                     );
                     float windX1 = bilerp(
-                        c00.windX[layer1],
-                        c10.windX[layer1],
-                        c01.windX[layer1],
-                        c11.windX[layer1],
+                        state.windXAt(c00, layer1),
+                        state.windXAt(c10, layer1),
+                        state.windXAt(c01, layer1),
+                        state.windXAt(c11, layer1),
+                        tx,
+                        tz
+                    );
+                    float windY0 = bilerp(
+                        state.windYAt(c00, layer0),
+                        state.windYAt(c10, layer0),
+                        state.windYAt(c01, layer0),
+                        state.windYAt(c11, layer0),
+                        tx,
+                        tz
+                    );
+                    float windY1 = bilerp(
+                        state.windYAt(c00, layer1),
+                        state.windYAt(c10, layer1),
+                        state.windYAt(c01, layer1),
+                        state.windYAt(c11, layer1),
                         tx,
                         tz
                     );
                     float windZ0 = bilerp(
-                        c00.windZ[layer0],
-                        c10.windZ[layer0],
-                        c01.windZ[layer0],
-                        c11.windZ[layer0],
+                        state.windZAt(c00, layer0),
+                        state.windZAt(c10, layer0),
+                        state.windZAt(c01, layer0),
+                        state.windZAt(c11, layer0),
                         tx,
                         tz
                     );
                     float windZ1 = bilerp(
-                        c00.windZ[layer1],
-                        c10.windZ[layer1],
-                        c01.windZ[layer1],
-                        c11.windZ[layer1],
+                        state.windZAt(c00, layer1),
+                        state.windZAt(c10, layer1),
+                        state.windZAt(c01, layer1),
+                        state.windZAt(c11, layer1),
                         tx,
                         tz
                     );
                     float air0 = bilerp(
-                        c00.ambientAirTemperatureKelvin[layer0],
-                        c10.ambientAirTemperatureKelvin[layer0],
-                        c01.ambientAirTemperatureKelvin[layer0],
-                        c11.ambientAirTemperatureKelvin[layer0],
+                        state.ambientAirTemperatureAt(c00, layer0),
+                        state.ambientAirTemperatureAt(c10, layer0),
+                        state.ambientAirTemperatureAt(c01, layer0),
+                        state.ambientAirTemperatureAt(c11, layer0),
                         tx,
                         tz
                     );
                     float air1 = bilerp(
-                        c00.ambientAirTemperatureKelvin[layer1],
-                        c10.ambientAirTemperatureKelvin[layer1],
-                        c01.ambientAirTemperatureKelvin[layer1],
-                        c11.ambientAirTemperatureKelvin[layer1],
+                        state.ambientAirTemperatureAt(c00, layer1),
+                        state.ambientAirTemperatureAt(c10, layer1),
+                        state.ambientAirTemperatureAt(c01, layer1),
+                        state.ambientAirTemperatureAt(c11, layer1),
                         tx,
                         tz
                     );
                     float surface0 = bilerp(
-                        c00.surfaceTemperatureKelvin[layer0],
-                        c10.surfaceTemperatureKelvin[layer0],
-                        c01.surfaceTemperatureKelvin[layer0],
-                        c11.surfaceTemperatureKelvin[layer0],
+                        state.surfaceTemperatureAt(c00, layer0),
+                        state.surfaceTemperatureAt(c10, layer0),
+                        state.surfaceTemperatureAt(c01, layer0),
+                        state.surfaceTemperatureAt(c11, layer0),
                         tx,
                         tz
                     );
                     float surface1 = bilerp(
-                        c00.surfaceTemperatureKelvin[layer1],
-                        c10.surfaceTemperatureKelvin[layer1],
-                        c01.surfaceTemperatureKelvin[layer1],
-                        c11.surfaceTemperatureKelvin[layer1],
+                        state.surfaceTemperatureAt(c00, layer1),
+                        state.surfaceTemperatureAt(c10, layer1),
+                        state.surfaceTemperatureAt(c01, layer1),
+                        state.surfaceTemperatureAt(c11, layer1),
                         tx,
                         tz
                     );
 
                     outWindX[cell] = MathHelper.lerp(ty, windX0, windX1);
+                    outWindY[cell] = MathHelper.lerp(ty, windY0, windY1);
                     outWindZ[cell] = MathHelper.lerp(ty, windZ0, windZ1);
                     outAirTemperature[cell] = MathHelper.lerp(ty, air0, air1);
                     outSurfaceTemperature[cell] = MathHelper.lerp(ty, surface0, surface1);
@@ -364,8 +370,8 @@ final class MesoscaleGrid implements AutoCloseable {
         return true;
     }
 
-    synchronized int cellCount() {
-        return cells.size() * activeLayers;
+    int cellCount() {
+        return readState.cellCount();
     }
 
     synchronized DiagnosticsSummary diagnosticsSummary(BlockPos focus) {
@@ -421,6 +427,11 @@ final class MesoscaleGrid implements AutoCloseable {
         float[] forcingGeostrophicWindZ = new float[stateCount];
         float[] forcingWindShearXPerBlock = new float[stateCount];
         float[] forcingWindShearZPerBlock = new float[stateCount];
+        float[] ablHeightBlocks = new float[stateCount];
+        float[] ablHeightAglBlocks = new float[stateCount];
+        float[] ablStability = new float[stateCount];
+        float[] ablMixingStrength = new float[stateCount];
+        float[] ablProfileBlend = new float[stateCount];
         float[] forcingNestedAmbientDeltaKelvin = new float[stateCount];
         float[] forcingNestedSurfaceDeltaKelvin = new float[stateCount];
         float[] forcingNestedWindXDelta = new float[stateCount];
@@ -483,6 +494,11 @@ final class MesoscaleGrid implements AutoCloseable {
                     forcingGeostrophicWindZ[stateIndex] = cell.geostrophicWindZ[layer];
                     forcingWindShearXPerBlock[stateIndex] = cell.windShearXPerBlock[layer];
                     forcingWindShearZPerBlock[stateIndex] = cell.windShearZPerBlock[layer];
+                    ablHeightBlocks[stateIndex] = cell.ablHeightBlocks[layer];
+                    ablHeightAglBlocks[stateIndex] = cell.ablHeightAglBlocks[layer];
+                    ablStability[stateIndex] = cell.ablStability[layer];
+                    ablMixingStrength[stateIndex] = cell.ablMixingStrength[layer];
+                    ablProfileBlend[stateIndex] = cell.ablProfileBlend[layer];
                     forcingNestedAmbientDeltaKelvin[stateIndex] = forcingBase >= 0 && forcingBase + CH_NESTED_AMBIENT_DELTA < forcingBuffer.length
                         ? forcingBuffer[forcingBase + CH_NESTED_AMBIENT_DELTA]
                         : 0.0f;
@@ -591,6 +607,11 @@ final class MesoscaleGrid implements AutoCloseable {
             forcingGeostrophicWindZ,
             forcingWindShearXPerBlock,
             forcingWindShearZPerBlock,
+            ablHeightBlocks,
+            ablHeightAglBlocks,
+            ablStability,
+            ablMixingStrength,
+            ablProfileBlend,
             forcingNestedAmbientDeltaKelvin,
             forcingNestedSurfaceDeltaKelvin,
             forcingNestedWindXDelta,
@@ -615,6 +636,7 @@ final class MesoscaleGrid implements AutoCloseable {
         cells.clear();
         forcingBuffer = new float[0];
         stateBuffer = new float[0];
+        readState = ReadState.EMPTY;
         lastTickProcessed = Long.MIN_VALUE;
         lastForcingRefreshTick = Long.MIN_VALUE;
         accumulatedStepSeconds = 0.0f;
@@ -636,6 +658,7 @@ final class MesoscaleGrid implements AutoCloseable {
             }
         }
         accumulatedStepSeconds -= stepsToRun * stepSeconds;
+        publishReadState();
     }
 
     synchronized void applyPendingNestedFeedback(Iterable<NestedFeedbackBin> feedbackBins) {
@@ -921,8 +944,6 @@ final class MesoscaleGrid implements AutoCloseable {
                     + terrainSteer * TERRAIN_WIND_DEFLECTION * surfaceWindX;
                 surfaceTargetWindX = MathHelper.clamp(surfaceTargetWindX, -maxBackgroundWind, maxBackgroundWind);
                 surfaceTargetWindZ = MathHelper.clamp(surfaceTargetWindZ, -maxBackgroundWind, maxBackgroundWind);
-                float aloftTargetWindX = MathHelper.clamp(geostrophicWindX, -maxBackgroundWind, maxBackgroundWind);
-                float aloftTargetWindZ = MathHelper.clamp(geostrophicWindZ, -maxBackgroundWind, maxBackgroundWind);
                 float surfaceAirDelta = (bg != null ? bg.surfaceTemperatureKelvin() : ambientAirTemperatureKelvin)
                     - ambientAirTemperatureKelvin;
                 WindVector terrainAdjustedSurfaceWind = terrainAdjustedSurfaceWind(
@@ -945,12 +966,54 @@ final class MesoscaleGrid implements AutoCloseable {
                     -maxBackgroundWind,
                     maxBackgroundWind
                 );
+                float aloftTargetWindX = MathHelper.clamp(geostrophicWindX, -maxBackgroundWind, maxBackgroundWind);
+                float aloftTargetWindZ = MathHelper.clamp(geostrophicWindZ, -maxBackgroundWind, maxBackgroundWind);
+                float aloftSpeed = windSpeed(aloftTargetWindX, aloftTargetWindZ);
+                float roughnessMeters = MathHelper.clamp(
+                    finiteOrDefault(cell.roughnessLengthMeters, ABL_MIN_ROUGHNESS_METERS),
+                    ABL_MIN_ROUGHNESS_METERS,
+                    ABL_MAX_ROUGHNESS_METERS
+                );
                 float stableWeight = MathHelper.clamp(-surfaceAirDelta / ABL_STABILITY_DELTA_K, 0.0f, 1.0f);
                 float unstableWeight = MathHelper.clamp(surfaceAirDelta / ABL_STABILITY_DELTA_K, 0.0f, 1.0f);
+                float stabilityIndex = MathHelper.clamp(surfaceAirDelta / ABL_STABILITY_DELTA_K, -1.0f, 1.0f);
+                float roughnessNorm = MathHelper.clamp(roughnessMeters / 2.0f, 0.0f, 1.0f);
+                float windMixing = MathHelper.clamp(Math.max(aloftSpeed, windSpeed(surfaceTargetWindX, surfaceTargetWindZ)) / 12.0f, 0.0f, 1.0f);
+                float mixingStrength = MathHelper.clamp(
+                    0.34f
+                        + 0.42f * unstableWeight
+                        + 0.22f * bgConvectiveEnvelope
+                        + 0.18f * windMixing
+                        - 0.24f * stableWeight
+                        - 0.12f * roughnessNorm,
+                    0.08f,
+                    1.0f
+                );
                 float ablHeightBlocks = ABL_NEUTRAL_HEIGHT_BLOCKS
                     + unstableWeight * (ABL_UNSTABLE_HEIGHT_BLOCKS - ABL_NEUTRAL_HEIGHT_BLOCKS)
-                    - stableWeight * (ABL_NEUTRAL_HEIGHT_BLOCKS - ABL_STABLE_HEIGHT_BLOCKS);
+                    - stableWeight * (ABL_NEUTRAL_HEIGHT_BLOCKS - ABL_STABLE_HEIGHT_BLOCKS)
+                    + bgConvectiveEnvelope * 96.0f;
+                float ekmanWeight = aloftSpeed > MIN_ALOFT_WIND_SPEED_MPS
+                    ? MathHelper.clamp(
+                        0.18f + 0.26f * stableWeight + 0.18f * roughnessNorm - 0.16f * unstableWeight,
+                        0.0f,
+                        0.58f
+                    )
+                    : 0.0f;
+                float ekmanTurn = ABL_EKMAN_MAX_TURN_RADIANS
+                    * (0.45f + 0.45f * stableWeight + 0.20f * roughnessNorm - 0.25f * unstableWeight)
+                    * MathHelper.clamp(aloftSpeed / 2.0f, 0.0f, 1.0f);
+                float coriolisSign = pseudoCoriolisFactor(cz) >= 0.0f ? 1.0f : -1.0f;
+                WindVector ekmanSurfaceWind = rotateWind(aloftTargetWindX, aloftTargetWindZ, -coriolisSign * ekmanTurn);
+                surfaceTargetWindX = MathHelper.lerp(ekmanWeight, surfaceTargetWindX, ekmanSurfaceWind.x());
+                surfaceTargetWindZ = MathHelper.lerp(ekmanWeight, surfaceTargetWindZ, ekmanSurfaceWind.z());
+                surfaceTargetWindX = MathHelper.clamp(surfaceTargetWindX, -maxBackgroundWind, maxBackgroundWind);
+                surfaceTargetWindZ = MathHelper.clamp(surfaceTargetWindZ, -maxBackgroundWind, maxBackgroundWind);
 
+                float previousLayerWindX = surfaceTargetWindX;
+                float previousLayerWindZ = surfaceTargetWindZ;
+                int previousLayerY = MathHelper.floor(cell.terrainHeightBlocks);
+                boolean previousLayerAir = false;
                 for (int layer = 0; layer < activeLayers; layer++) {
                     int sampleY = layerCenterBlockY(layer);
                     boolean terrainSolid = sampleY <= cell.terrainHeightBlocks;
@@ -962,18 +1025,39 @@ final class MesoscaleGrid implements AutoCloseable {
                     float surfaceInfluence = (float) Math.exp(-aboveGround / Math.max(1.0f, layerHeightBlocks * 1.5f));
                     float layerSurfaceTarget = layerAmbient + surfaceInfluence
                         * (((bg != null ? bg.surfaceTemperatureKelvin() : ambientAirTemperatureKelvin) + temperatureAdjustment) - layerAmbient);
-                    float aloftBlend = 1.0f - (float) Math.exp(-aboveGround / Math.max(1.0f, ablHeightBlocks));
-                    float layerWindX = MathHelper.lerp(aloftBlend, surfaceTargetWindX, aloftTargetWindX);
-                    float layerWindZ = MathHelper.lerp(aloftBlend, surfaceTargetWindZ, aloftTargetWindZ);
+                    float profileBlend = ablProfileBlend(aboveGround, ablHeightBlocks, mixingStrength, roughnessMeters);
+                    float roughnessInfluence = (float) Math.exp(-aboveGround / (48.0f + roughnessMeters * 28.0f));
+                    float roughnessDrag = MathHelper.clamp(
+                        roughnessNorm
+                            * roughnessInfluence
+                            * (0.55f + 0.25f * stableWeight - 0.18f * unstableWeight),
+                        0.0f,
+                        0.72f
+                    );
+                    float layerSurfaceWindX = surfaceTargetWindX * (1.0f - roughnessDrag);
+                    float layerSurfaceWindZ = surfaceTargetWindZ * (1.0f - roughnessDrag);
+                    float layerWindX = MathHelper.lerp(profileBlend, layerSurfaceWindX, aloftTargetWindX);
+                    float layerWindZ = MathHelper.lerp(profileBlend, layerSurfaceWindZ, aloftTargetWindZ);
                     layerWindX = MathHelper.clamp(layerWindX, -maxBackgroundWind, maxBackgroundWind);
                     layerWindZ = MathHelper.clamp(layerWindZ, -maxBackgroundWind, maxBackgroundWind);
-                    float shearScale = 1.0f / Math.max(1.0f, aboveGround);
+                    if (terrainSolid) {
+                        layerWindX = 0.0f;
+                        layerWindZ = 0.0f;
+                    }
+                    float shearDy = previousLayerAir
+                        ? Math.max(1.0f, sampleY - previousLayerY)
+                        : Math.max(1.0f, aboveGround);
                     cell.surfaceWindX[layer] = surfaceTargetWindX;
                     cell.surfaceWindZ[layer] = surfaceTargetWindZ;
                     cell.geostrophicWindX[layer] = aloftTargetWindX;
                     cell.geostrophicWindZ[layer] = aloftTargetWindZ;
-                    cell.windShearXPerBlock[layer] = (layerWindX - surfaceTargetWindX) * shearScale;
-                    cell.windShearZPerBlock[layer] = (layerWindZ - surfaceTargetWindZ) * shearScale;
+                    cell.windShearXPerBlock[layer] = terrainSolid ? 0.0f : (layerWindX - previousLayerWindX) / shearDy;
+                    cell.windShearZPerBlock[layer] = terrainSolid ? 0.0f : (layerWindZ - previousLayerWindZ) / shearDy;
+                    cell.ablHeightBlocks[layer] = ablHeightBlocks;
+                    cell.ablHeightAglBlocks[layer] = layerHeightAboveGround;
+                    cell.ablStability[layer] = stabilityIndex;
+                    cell.ablMixingStrength[layer] = mixingStrength;
+                    cell.ablProfileBlend[layer] = terrainSolid ? 0.0f : profileBlend;
                     float roughnessDecay = 1.0f / (1.0f + aboveGround / 64.0f);
                     float humidityDecay = 0.85f + 0.15f * surfaceInfluence;
                     float layerHumidity = MathHelper.clamp(bgHumidity * humidityDecay, 0.0f, 1.0f);
@@ -1024,6 +1108,12 @@ final class MesoscaleGrid implements AutoCloseable {
                     forcingBuffer[base + CH_NESTED_SURFACE_DELTA] = preservedNestedSurfaceDelta;
                     forcingBuffer[base + CH_SOLID_MASK] = terrainSolid ? 1.0f : 0.0f;
                     cell.humidity[layer] = layerHumidity;
+                    if (!terrainSolid) {
+                        previousLayerWindX = layerWindX;
+                        previousLayerWindZ = layerWindZ;
+                        previousLayerY = sampleY;
+                        previousLayerAir = true;
+                    }
                 }
             }
         }
@@ -1308,6 +1398,116 @@ final class MesoscaleGrid implements AutoCloseable {
             nativeBridge.releaseContext(nativeContextKey);
             nativeContextKey = 0L;
         }
+    }
+
+    private void publishReadState() {
+        int gridWidth = radiusCells * 2 + 1;
+        int columnCount = gridWidth * gridWidth;
+        int stateCount = columnCount * activeLayers;
+        boolean[] columnPresent = new boolean[columnCount];
+        float[] terrainHeightBlocks = new float[columnCount];
+        float[] biomeTemperature = new float[columnCount];
+        float[] roughnessLengthMeters = new float[columnCount];
+        byte[] surfaceClass = new byte[columnCount];
+        float[] ambientAirTemperatureKelvin = new float[stateCount];
+        float[] deepGroundTemperatureKelvin = new float[stateCount];
+        float[] surfaceTemperatureKelvin = new float[stateCount];
+        float[] windX = new float[stateCount];
+        float[] windY = new float[stateCount];
+        float[] windZ = new float[stateCount];
+        float[] humidity = new float[stateCount];
+        float[] windShearXPerBlock = new float[stateCount];
+        float[] windShearZPerBlock = new float[stateCount];
+        float[] ablHeightBlocks = new float[stateCount];
+        float[] ablHeightAglBlocks = new float[stateCount];
+        float[] ablStability = new float[stateCount];
+        float[] ablMixingStrength = new float[stateCount];
+        float[] ablProfileBlend = new float[stateCount];
+        int presentColumns = 0;
+
+        for (int cx = centerCellX - radiusCells; cx <= centerCellX + radiusCells; cx++) {
+            for (int cz = centerCellZ - radiusCells; cz <= centerCellZ + radiusCells; cz++) {
+                CellColumnState cell = cells.get(pack(cx, cz));
+                if (cell == null) {
+                    continue;
+                }
+                int column = readColumnIndex(cx, cz, centerCellX, centerCellZ, radiusCells, gridWidth);
+                if (column < 0) {
+                    continue;
+                }
+                columnPresent[column] = true;
+                presentColumns++;
+                terrainHeightBlocks[column] = cell.terrainHeightBlocks;
+                biomeTemperature[column] = cell.biomeTemperature;
+                roughnessLengthMeters[column] = cell.roughnessLengthMeters;
+                surfaceClass[column] = cell.surfaceClass;
+                int layerCount = Math.min(activeLayers, cell.layerCount());
+                for (int layer = 0; layer < layerCount; layer++) {
+                    int state = column * activeLayers + layer;
+                    ambientAirTemperatureKelvin[state] = cell.ambientAirTemperatureKelvin[layer];
+                    deepGroundTemperatureKelvin[state] = cell.deepGroundTemperatureKelvin[layer];
+                    surfaceTemperatureKelvin[state] = cell.surfaceTemperatureKelvin[layer];
+                    windX[state] = cell.windX[layer];
+                    windY[state] = cell.windY[layer];
+                    windZ[state] = cell.windZ[layer];
+                    humidity[state] = cell.humidity[layer];
+                    windShearXPerBlock[state] = cell.windShearXPerBlock[layer];
+                    windShearZPerBlock[state] = cell.windShearZPerBlock[layer];
+                    ablHeightBlocks[state] = cell.ablHeightBlocks[layer];
+                    ablHeightAglBlocks[state] = cell.ablHeightAglBlocks[layer];
+                    ablStability[state] = cell.ablStability[layer];
+                    ablMixingStrength[state] = cell.ablMixingStrength[layer];
+                    ablProfileBlend[state] = cell.ablProfileBlend[layer];
+                }
+            }
+        }
+
+        readState = new ReadState(
+            gridWidth,
+            activeLayers,
+            cellSizeBlocks,
+            layerHeightBlocks,
+            radiusCells,
+            centerCellX,
+            centerCellZ,
+            verticalBaseY,
+            presentColumns,
+            columnPresent,
+            terrainHeightBlocks,
+            biomeTemperature,
+            roughnessLengthMeters,
+            surfaceClass,
+            ambientAirTemperatureKelvin,
+            deepGroundTemperatureKelvin,
+            surfaceTemperatureKelvin,
+            windX,
+            windY,
+            windZ,
+            humidity,
+            windShearXPerBlock,
+            windShearZPerBlock,
+            ablHeightBlocks,
+            ablHeightAglBlocks,
+            ablStability,
+            ablMixingStrength,
+            ablProfileBlend
+        );
+    }
+
+    private static int readColumnIndex(
+        int cellX,
+        int cellZ,
+        int centerCellX,
+        int centerCellZ,
+        int radiusCells,
+        int gridWidth
+    ) {
+        int localX = cellX - (centerCellX - radiusCells);
+        int localZ = cellZ - (centerCellZ - radiusCells);
+        if (localX < 0 || localX >= gridWidth || localZ < 0 || localZ >= gridWidth) {
+            return -1;
+        }
+        return localX * gridWidth + localZ;
     }
 
     private int computeActiveLayers() {
@@ -1701,6 +1901,41 @@ final class MesoscaleGrid implements AutoCloseable {
         return MathHelper.sqrt(windX * windX + windZ * windZ);
     }
 
+    private float ablProfileBlend(float heightAglBlocks, float ablHeightBlocks, float mixingStrength, float roughnessMeters) {
+        if (!(heightAglBlocks > 0.0f)) {
+            return 0.0f;
+        }
+        float safeAblHeight = Math.max(24.0f, finiteOrDefault(ablHeightBlocks, ABL_NEUTRAL_HEIGHT_BLOCKS));
+        float safeMixing = MathHelper.clamp(finiteOrDefault(mixingStrength, 0.35f), 0.08f, 1.0f);
+        float safeRoughness = MathHelper.clamp(
+            finiteOrDefault(roughnessMeters, ABL_MIN_ROUGHNESS_METERS),
+            ABL_MIN_ROUGHNESS_METERS,
+            ABL_MAX_ROUGHNESS_METERS
+        );
+        float transitionHeight = safeAblHeight / (0.45f + 1.65f * safeMixing) + safeRoughness * 18.0f;
+        float exponentialBlend = 1.0f - (float) Math.exp(-heightAglBlocks / Math.max(8.0f, transitionHeight));
+        float mixedLayerBoost = safeMixing * 0.24f * (float) Math.exp(-heightAglBlocks / Math.max(48.0f, safeAblHeight * 0.45f));
+        return MathHelper.clamp(exponentialBlend + mixedLayerBoost, 0.0f, 1.0f);
+    }
+
+    private WindVector rotateWind(float windX, float windZ, float radians) {
+        if (!Float.isFinite(windX) || !Float.isFinite(windZ) || !Float.isFinite(radians)) {
+            return new WindVector(finiteOrDefault(windX, 0.0f), finiteOrDefault(windZ, 0.0f));
+        }
+        float cos = MathHelper.cos(radians);
+        float sin = MathHelper.sin(radians);
+        return new WindVector(windX * cos - windZ * sin, windX * sin + windZ * cos);
+    }
+
+    private float pseudoCoriolisFactor(int cellZ) {
+        float periodCells = 384.0f;
+        float wrapped = cellZ % periodCells;
+        if (wrapped < 0.0f) {
+            wrapped += periodCells;
+        }
+        return MathHelper.clamp((wrapped - periodCells * 0.5f) / (periodCells * 0.5f), -1.0f, 1.0f);
+    }
+
     private long pack(int x, int z) {
         return ((long) x << 32) ^ (z & 0xffffffffL);
     }
@@ -1762,6 +1997,153 @@ final class MesoscaleGrid implements AutoCloseable {
         }
     }
 
+    private record ReadState(
+        int gridWidth,
+        int activeLayers,
+        int cellSizeBlocks,
+        int layerHeightBlocks,
+        int radiusCells,
+        int centerCellX,
+        int centerCellZ,
+        int verticalBaseY,
+        int presentColumns,
+        boolean[] columnPresent,
+        float[] terrainHeightBlocks,
+        float[] biomeTemperature,
+        float[] roughnessLengthMeters,
+        byte[] surfaceClass,
+        float[] ambientAirTemperatureKelvin,
+        float[] deepGroundTemperatureKelvin,
+        float[] surfaceTemperatureKelvin,
+        float[] windX,
+        float[] windY,
+        float[] windZ,
+        float[] humidity,
+        float[] windShearXPerBlock,
+        float[] windShearZPerBlock,
+        float[] ablHeightBlocks,
+        float[] ablHeightAglBlocks,
+        float[] ablStability,
+        float[] ablMixingStrength,
+        float[] ablProfileBlend
+    ) {
+        private static final ReadState EMPTY = new ReadState(
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            new boolean[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new byte[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0],
+            new float[0]
+        );
+
+        private boolean empty() {
+            return gridWidth <= 0 || activeLayers <= 0 || presentColumns <= 0;
+        }
+
+        private int cellCount() {
+            return presentColumns * activeLayers;
+        }
+
+        private Sample sample(BlockPos pos) {
+            if (empty() || pos == null) {
+                return null;
+            }
+            int cellX = Math.floorDiv(pos.getX(), cellSizeBlocks);
+            int cellZ = Math.floorDiv(pos.getZ(), cellSizeBlocks);
+            int column = columnIndex(cellX, cellZ);
+            if (column < 0) {
+                return null;
+            }
+            int layer = activeLayers <= 1
+                ? 0
+                : MathHelper.clamp(MathHelper.floor((pos.getY() - verticalBaseY) / (float) layerHeightBlocks), 0, activeLayers - 1);
+            int state = stateIndex(column, layer);
+            return new Sample(
+                terrainHeightBlocks[column],
+                biomeTemperature[column],
+                ambientAirTemperatureKelvin[state],
+                deepGroundTemperatureKelvin[state],
+                surfaceTemperatureKelvin[state],
+                roughnessLengthMeters[column],
+                windX[state],
+                windY[state],
+                windZ[state],
+                humidity[state],
+                windShearXPerBlock[state],
+                windShearZPerBlock[state],
+                ablHeightBlocks[state],
+                ablHeightAglBlocks[state],
+                ablStability[state],
+                ablMixingStrength[state],
+                ablProfileBlend[state],
+                surfaceClass[column]
+            );
+        }
+
+        private int columnIndexAtClamped(int cellX, int cellZ) {
+            if (empty()) {
+                return -1;
+            }
+            int clampedX = MathHelper.clamp(cellX, centerCellX - radiusCells, centerCellX + radiusCells);
+            int clampedZ = MathHelper.clamp(cellZ, centerCellZ - radiusCells, centerCellZ + radiusCells);
+            return columnIndex(clampedX, clampedZ);
+        }
+
+        private int columnIndex(int cellX, int cellZ) {
+            int index = readColumnIndex(cellX, cellZ, centerCellX, centerCellZ, radiusCells, gridWidth);
+            if (index < 0 || index >= columnPresent.length || !columnPresent[index]) {
+                return -1;
+            }
+            return index;
+        }
+
+        private float windXAt(int column, int layer) {
+            return windX[stateIndex(column, layer)];
+        }
+
+        private float windYAt(int column, int layer) {
+            return windY[stateIndex(column, layer)];
+        }
+
+        private float windZAt(int column, int layer) {
+            return windZ[stateIndex(column, layer)];
+        }
+
+        private float ambientAirTemperatureAt(int column, int layer) {
+            return ambientAirTemperatureKelvin[stateIndex(column, layer)];
+        }
+
+        private float surfaceTemperatureAt(int column, int layer) {
+            return surfaceTemperatureKelvin[stateIndex(column, layer)];
+        }
+
+        private int stateIndex(int column, int layer) {
+            return column * activeLayers + layer;
+        }
+    }
+
     record Sample(
         float terrainHeightBlocks,
         float biomeTemperature,
@@ -1773,6 +2155,13 @@ final class MesoscaleGrid implements AutoCloseable {
         float windY,
         float windZ,
         float humidity,
+        float windShearXPerBlock,
+        float windShearZPerBlock,
+        float ablHeightBlocks,
+        float ablHeightAglBlocks,
+        float ablStability,
+        float ablMixingStrength,
+        float ablProfileBlend,
         byte surfaceClass
     ) {
     }
@@ -1805,6 +2194,11 @@ final class MesoscaleGrid implements AutoCloseable {
         float[] forcingGeostrophicWindZ,
         float[] forcingWindShearXPerBlock,
         float[] forcingWindShearZPerBlock,
+        float[] ablHeightBlocks,
+        float[] ablHeightAglBlocks,
+        float[] ablStability,
+        float[] ablMixingStrength,
+        float[] ablProfileBlend,
         float[] forcingNestedAmbientDeltaKelvin,
         float[] forcingNestedSurfaceDeltaKelvin,
         float[] forcingNestedWindXDelta,
@@ -1908,6 +2302,11 @@ final class MesoscaleGrid implements AutoCloseable {
         private float[] geostrophicWindZ;
         private float[] windShearXPerBlock;
         private float[] windShearZPerBlock;
+        private float[] ablHeightBlocks;
+        private float[] ablHeightAglBlocks;
+        private float[] ablStability;
+        private float[] ablMixingStrength;
+        private float[] ablProfileBlend;
         private float[] humidity;
 
         private CellColumnState(int layers) {
@@ -1928,6 +2327,11 @@ final class MesoscaleGrid implements AutoCloseable {
                 geostrophicWindZ = new float[layers];
                 windShearXPerBlock = new float[layers];
                 windShearZPerBlock = new float[layers];
+                ablHeightBlocks = new float[layers];
+                ablHeightAglBlocks = new float[layers];
+                ablStability = new float[layers];
+                ablMixingStrength = new float[layers];
+                ablProfileBlend = new float[layers];
                 humidity = new float[layers];
             }
         }

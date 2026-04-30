@@ -4,12 +4,12 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -29,9 +29,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.aerodynamics4mc.FanBlock;
 import com.aerodynamics4mc.ModBlocks;
+import com.aerodynamics4mc.api.AeroWindSamplingRules;
 import com.aerodynamics4mc.api.AeroWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 import com.aerodynamics4mc.flow.AnalysisFlowCodec;
+import com.aerodynamics4mc.net.AeroClientL2PreferencePayload;
 import com.aerodynamics4mc.net.AeroCoarseWindPayload;
 import com.aerodynamics4mc.net.AeroFlowPayload;
 import com.aerodynamics4mc.net.AeroFlowAnalysisPayload;
@@ -113,10 +115,19 @@ public final class AeroServerRuntime {
     private static final int FLOW_COUNT = GRID_SIZE * GRID_SIZE * GRID_SIZE * RESPONSE_CHANNELS;
 
     private static final int WINDOW_THERMAL_REFRESH_TICKS = 40;
-    private static final int PARTICLE_FLOW_SYNC_INTERVAL_TICKS = 4;
+    private static final int COARSE_FLOW_SYNC_INTERVAL_TICKS = 4;
+    private static final int FLOW_ATLAS_BASE_RESEND_INTERVAL_TICKS = 1;
+    private static final int FLOW_ATLAS_PLAYER_INTERVAL_INCREMENT_TICKS = TICKS_PER_SECOND / 4;
+    private static final int FLOW_ATLAS_MAX_RESEND_INTERVAL_TICKS = TICKS_PER_SECOND * 6;
+    private static final int FLOW_ATLAS_MAX_PAYLOADS_PER_SYNC = 2;
+    private static final boolean SERVER_L2_ATLAS_STREAMING_ENABLED = true;
     private static final int PARTICLE_FLOW_SAMPLE_STRIDE = 1;
     private static final float ATLAS_VELOCITY_QUANT_RANGE = 5.6f;
     private static final float ATLAS_PRESSURE_QUANT_RANGE = 0.03f;
+    private static final int COARSE_ATMOSPHERE_CHANNELS = 10;
+    private static final float COARSE_TEMPERATURE_ANOMALY_RANGE_K = 64.0f;
+    private static final float COARSE_TURBULENCE_RANGE_MPS = 3.0f;
+    private static final float COARSE_SHEAR_RANGE_PER_BLOCK = 0.08f;
     private static final float ZERO_ATLAS_MAX_SPEED_EPS_MPS = 0.02f;
     private static final int ZERO_ATLAS_HOLD_TICKS = 6;
     private static final float EXPECTED_COARSE_WIND_MIN_MPS = 0.05f;
@@ -211,6 +222,8 @@ public final class AeroServerRuntime {
     private static final int STATIC_MIRROR_LOW_PRIORITY_BUILD_BUDGET = 1;
     private static final int FAN_DUCT_REFRESH_BUDGET_PER_TICK = 1;
     private static final int WORLD_DELTA_FLUSH_BATCH_SIZE = 256;
+    private static final int WORLD_DELTA_FLUSH_MAX_BATCHES_PER_CYCLE = 1;
+    private static final int RESIDENT_BRICK_STATIC_REFRESH_BUDGET_PER_CYCLE = 2;
     private static final boolean ENTITY_SAMPLE_COLLECTION_ENABLED = false;
     private static final int MAIN_THREAD_PHASE_SERVICE_INIT = 0;
     private static final int MAIN_THREAD_PHASE_FOCUS = 1;
@@ -288,9 +301,9 @@ public final class AeroServerRuntime {
     private final Object simulationStateLock = new Object();
     private final Object coordinatorLifecycleLock = new Object();
     private final Object pendingWorldDeltasLock = new Object();
-    private final ArrayDeque<NativeSimulationBridge.WorldDelta> pendingWorldDeltas = new ArrayDeque<>();
+    private final LinkedHashMap<WorldDeltaQueueKey, NativeSimulationBridge.WorldDelta> pendingWorldDeltas = new LinkedHashMap<>();
     private final Object pendingResidentBrickStaticRefreshesLock = new Object();
-    private final ArrayDeque<ChunkResidentBrickRefreshRequest> pendingResidentBrickStaticRefreshes = new ArrayDeque<>();
+    private final LinkedHashSet<ChunkResidentBrickRefreshRequest> pendingResidentBrickStaticRefreshes = new LinkedHashSet<>();
     private final ExecutorService diagnosticsExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "aero-diagnostics-writer");
         thread.setDaemon(true);
@@ -310,6 +323,8 @@ public final class AeroServerRuntime {
     private final Map<WindowKey, Integer> solveWindowRetainUntilTick = new HashMap<>();
     private final Map<UUID, PlayerMotionAnchorState> playerMotionAnchorStates = new HashMap<>();
     private final Map<UUID, CoarseWindSyncState> lastCoarseWindSyncStates = new HashMap<>();
+    private final Map<UUID, FlowAtlasSyncState> lastFlowAtlasSyncStates = new HashMap<>();
+    private final Set<UUID> clientLocalL2Players = ConcurrentHashMap.newKeySet();
     private final Map<WindowKey, Integer> zeroAtlasHoldUntilTick = new HashMap<>();
     private final Set<WindowKey> mirrorOnlyPrewarmedWindowKeys = new HashSet<>();
     private final Map<WindowKey, Long> mirrorOnlyUploadedBrickStaticSignatures = new HashMap<>();
@@ -350,6 +365,20 @@ public final class AeroServerRuntime {
     private volatile float lastCoordinatorAppliedMaxSpeed = 0.0f;
     private volatile long lastCoordinatorWaitNanos = 0L;
     private volatile long lastCoordinatorPostSolveNanos = 0L;
+    private volatile int lastBackgroundRefreshAppliedTick = Integer.MIN_VALUE;
+    private volatile int lastBackgroundRefreshWorldCount = 0;
+    private volatile long lastBackgroundRefreshNanos = 0L;
+    private volatile long lastBackgroundDiagnosticsNanos = 0L;
+    private volatile long lastBackgroundDriverNanos = 0L;
+    private volatile long lastBackgroundL0Nanos = 0L;
+    private volatile long lastBackgroundL1Nanos = 0L;
+    private volatile long lastBackgroundFeedbackNanos = 0L;
+    private volatile int pendingWorldDeltaCount = 0;
+    private volatile int lastWorldDeltaFlushCount = 0;
+    private volatile long lastWorldDeltaFlushNanos = 0L;
+    private volatile int pendingResidentBrickStaticRefreshCount = 0;
+    private volatile int lastResidentBrickStaticRefreshCount = 0;
+    private volatile long lastResidentBrickStaticRefreshNanos = 0L;
     private volatile long simulationServiceId = 0L;
     private volatile MinecraftServer currentServer;
     private int lastSimulationFocusX = Integer.MIN_VALUE;
@@ -380,7 +409,13 @@ public final class AeroServerRuntime {
             INSTANCE.broadcastState(server);
             INSTANCE.sendFlowSnapshotToPlayer(handler.player, server);
         });
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> INSTANCE.broadcastState(server));
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            INSTANCE.onPlayerDisconnected(handler.player);
+            INSTANCE.broadcastState(server);
+        });
+        ServerPlayNetworking.registerGlobalReceiver(AeroClientL2PreferencePayload.ID, (payload, context) ->
+            context.server().execute(() -> INSTANCE.setClientLocalL2Preference(context.player(), payload.localL2Enabled()))
+        );
         ServerLifecycleEvents.SERVER_STOPPED.register(INSTANCE::shutdownAll);
         CommandRegistrationCallback.EVENT.register(INSTANCE::registerCommands);
     }
@@ -403,12 +438,41 @@ public final class AeroServerRuntime {
         return INSTANCE.publishedEntitySamples.get().get(entityId);
     }
 
+    private void setClientLocalL2Preference(ServerPlayerEntity player, boolean enabled) {
+        if (player == null) {
+            return;
+        }
+        UUID playerId = player.getUuid();
+        if (enabled) {
+            clientLocalL2Players.add(playerId);
+            lastFlowAtlasSyncStates.remove(playerId);
+            playerMotionAnchorStates.remove(playerId);
+        } else {
+            clientLocalL2Players.remove(playerId);
+        }
+    }
+
+    private void onPlayerDisconnected(ServerPlayerEntity player) {
+        if (player == null) {
+            return;
+        }
+        UUID playerId = player.getUuid();
+        clientLocalL2Players.remove(playerId);
+        playerMotionAnchorStates.remove(playerId);
+        lastCoarseWindSyncStates.remove(playerId);
+        lastFlowAtlasSyncStates.remove(playerId);
+    }
+
+    private boolean usesClientLocalL2(ServerPlayerEntity player) {
+        return player != null && clientLocalL2Players.contains(player.getUuid());
+    }
+
     public static AeroWindSample sampleWind(ServerWorld world, Vec3d position) {
         return sampleFlow(world, position);
     }
 
     public static AeroWindSample sampleFlow(ServerWorld world, Vec3d position) {
-        return sampleFlow(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+        return sampleFlow(world, position, SamplePolicy.SERVER_COARSE_ONLY);
     }
 
     public static AeroWindSample sampleFlow(ServerWorld world, Vec3d position, SamplePolicy policy) {
@@ -418,12 +482,27 @@ public final class AeroServerRuntime {
         return INSTANCE.sampleWind(world.getRegistryKey(), BlockPos.ofFloored(position), policy);
     }
 
+    public static AeroWindSample sampleFlow(ServerPlayerEntity player, Vec3d position) {
+        return sampleFlow(player, position, SamplePolicy.SERVER_COARSE_ONLY);
+    }
+
+    public static AeroWindSample sampleFlow(ServerPlayerEntity player, Vec3d position, SamplePolicy policy) {
+        if (player == null || position == null) {
+            return AeroWindSample.ZERO;
+        }
+        return INSTANCE.sampleWind(
+            player.getEntityWorld().getRegistryKey(),
+            BlockPos.ofFloored(position),
+            effectiveSamplePolicyForPlayer(player, policy)
+        );
+    }
+
     public static AeroWindSample sampleWind(ServerWorld world, BlockPos position) {
         return sampleFlow(world, position);
     }
 
     public static AeroWindSample sampleFlow(ServerWorld world, BlockPos position) {
-        return sampleFlow(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+        return sampleFlow(world, position, SamplePolicy.SERVER_COARSE_ONLY);
     }
 
     public static AeroWindSample sampleFlow(ServerWorld world, BlockPos position, SamplePolicy policy) {
@@ -431,6 +510,30 @@ public final class AeroServerRuntime {
             return AeroWindSample.ZERO;
         }
         return INSTANCE.sampleWind(world.getRegistryKey(), position, policy);
+    }
+
+    public static AeroWindSample sampleFlow(ServerPlayerEntity player, BlockPos position) {
+        return sampleFlow(player, position, SamplePolicy.SERVER_COARSE_ONLY);
+    }
+
+    public static AeroWindSample sampleFlow(ServerPlayerEntity player, BlockPos position, SamplePolicy policy) {
+        if (player == null || position == null) {
+            return AeroWindSample.ZERO;
+        }
+        return INSTANCE.sampleWind(
+            player.getEntityWorld().getRegistryKey(),
+            position,
+            effectiveSamplePolicyForPlayer(player, policy)
+        );
+    }
+
+    private static SamplePolicy effectiveSamplePolicyForPlayer(ServerPlayerEntity player, SamplePolicy policy) {
+        SamplePolicy effectivePolicy = policy == null ? SamplePolicy.SERVER_COARSE_ONLY : policy;
+        if (effectivePolicy != SamplePolicy.DIAGNOSTIC_ALL_SOURCES
+            && AeroWindSamplingRules.isFastPlayerVelocity(player.getVelocity())) {
+            return SamplePolicy.SERVER_COARSE_ONLY;
+        }
+        return effectivePolicy;
     }
 
     private AeroWindSample sampleWind(RegistryKey<World> worldKey, BlockPos position, SamplePolicy policy) {
@@ -442,48 +545,56 @@ public final class AeroServerRuntime {
     private void onChunkLoad(ServerWorld world, WorldChunk chunk) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_CHUNK_LOAD, () -> {
             worldMirror.onChunkLoad(world, chunk);
-            submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
-                NativeSimulationBridge.WORLD_DELTA_CHUNK_LOADED,
-                chunk.getPos().getStartX(),
-                world.getBottomY(),
-                chunk.getPos().getStartZ(),
-                world.getRegistryKey().getValue().hashCode(),
-                0,
-                0,
-                0,
-                0.0f,
-                0.0f,
-                0.0f,
-                0.0f
-            ));
-            queueResidentBrickStaticRefreshForChunk(world.getRegistryKey(), chunk.getPos());
+            if (isRuntimeChunkTracked(world.getRegistryKey(), chunk.getPos())) {
+                submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
+                    NativeSimulationBridge.WORLD_DELTA_CHUNK_LOADED,
+                    chunk.getPos().getStartX(),
+                    world.getBottomY(),
+                    chunk.getPos().getStartZ(),
+                    world.getRegistryKey().getValue().hashCode(),
+                    0,
+                    0,
+                    0,
+                    0.0f,
+                    0.0f,
+                    0.0f,
+                    0.0f
+                ));
+                queueResidentBrickStaticRefreshForChunk(world.getRegistryKey(), chunk.getPos());
+            }
         });
     }
 
     private void onChunkUnload(ServerWorld world, WorldChunk chunk) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_CHUNK_UNLOAD, () -> {
             worldMirror.onChunkUnload(world, chunk.getPos());
-            submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
-                NativeSimulationBridge.WORLD_DELTA_CHUNK_UNLOADED,
-                chunk.getPos().getStartX(),
-                world.getBottomY(),
-                chunk.getPos().getStartZ(),
-                world.getRegistryKey().getValue().hashCode(),
-                0,
-                0,
-                0,
-                0.0f,
-                0.0f,
-                0.0f,
-                0.0f
-            ));
-            queueResidentBrickStaticRefreshForChunk(world.getRegistryKey(), chunk.getPos());
+            if (isRuntimeChunkTracked(world.getRegistryKey(), chunk.getPos())) {
+                submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
+                    NativeSimulationBridge.WORLD_DELTA_CHUNK_UNLOADED,
+                    chunk.getPos().getStartX(),
+                    world.getBottomY(),
+                    chunk.getPos().getStartZ(),
+                    world.getRegistryKey().getValue().hashCode(),
+                    0,
+                    0,
+                    0,
+                    0.0f,
+                    0.0f,
+                    0.0f,
+                    0.0f
+                ));
+                queueResidentBrickStaticRefreshForChunk(world.getRegistryKey(), chunk.getPos());
+            }
         });
     }
 
     private void queueResidentBrickStaticRefreshForChunk(RegistryKey<World> worldKey, ChunkPos chunkPos) {
+        if (!isRuntimeChunkTracked(worldKey, chunkPos)) {
+            return;
+        }
         synchronized (pendingResidentBrickStaticRefreshesLock) {
-            pendingResidentBrickStaticRefreshes.addLast(new ChunkResidentBrickRefreshRequest(worldKey, chunkPos.x, chunkPos.z));
+            pendingResidentBrickStaticRefreshes.add(new ChunkResidentBrickRefreshRequest(worldKey, chunkPos.x, chunkPos.z));
+            pendingResidentBrickStaticRefreshCount = pendingResidentBrickStaticRefreshes.size();
         }
     }
 
@@ -512,6 +623,9 @@ public final class AeroServerRuntime {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_ENTITY_LOAD, () -> {
             worldMirror.onBlockEntityLoad(blockEntity, world);
             BlockPos pos = blockEntity.getPos();
+            if (!isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
+                return;
+            }
             submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
                 NativeSimulationBridge.WORLD_DELTA_BLOCK_ENTITY_LOADED,
                 pos.getX(),
@@ -533,6 +647,9 @@ public final class AeroServerRuntime {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_ENTITY_UNLOAD, () -> {
             worldMirror.onBlockEntityUnload(blockEntity, world);
             BlockPos pos = blockEntity.getPos();
+            if (!isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
+                return;
+            }
             submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
                 NativeSimulationBridge.WORLD_DELTA_BLOCK_ENTITY_UNLOADED,
                 pos.getX(),
@@ -587,21 +704,9 @@ public final class AeroServerRuntime {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_CHANGED, () -> {
             worldMirror.onBlockChanged(world, pos, oldState, newState);
             invalidateDynamicRegionsForBlock(world, pos);
-            submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
-                NativeSimulationBridge.WORLD_DELTA_BLOCK_CHANGED,
-                pos.getX(),
-                pos.getY(),
-                pos.getZ(),
-                world.getRegistryKey().getValue().hashCode(),
-                oldState.hashCode(),
-                newState.hashCode(),
-                0,
-                0.0f,
-                0.0f,
-                0.0f,
-                0.0f
-            ));
-            submitBrickStaticCellPatchDeltas(world, pos);
+            if (isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
+                submitBrickStaticCellPatchDeltas(world, pos);
+            }
         });
     }
 
@@ -614,7 +719,7 @@ public final class AeroServerRuntime {
 
     private void submitBrickStaticCellPatchDelta(ServerWorld world, BlockPos pos) {
         long serviceId = simulationServiceId;
-        if (serviceId == 0L) {
+        if (serviceId == 0L || !isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
             return;
         }
         NativeSimulationBridge.WorldDelta delta = buildBrickStaticCellPatchDelta(world, pos);
@@ -691,6 +796,42 @@ public final class AeroServerRuntime {
             && pos.getZ() >= origin.getZ() && pos.getZ() < origin.getZ() + size;
     }
 
+    private boolean isRuntimeBlockTracked(RegistryKey<World> worldKey, BlockPos pos) {
+        if (!streamingEnabled || simulationServiceId == 0L || worldKey == null || pos == null) {
+            return false;
+        }
+        for (WindowKey key : desiredWindowKeys) {
+            if (key.worldKey().equals(worldKey) && containsBlock(key.origin(), pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRuntimeChunkTracked(RegistryKey<World> worldKey, ChunkPos chunkPos) {
+        if (!streamingEnabled || simulationServiceId == 0L || worldKey == null || chunkPos == null) {
+            return false;
+        }
+        int chunkMinX = chunkPos.getStartX();
+        int chunkMinZ = chunkPos.getStartZ();
+        int chunkMaxX = chunkMinX + CHUNK_SIZE;
+        int chunkMaxZ = chunkMinZ + CHUNK_SIZE;
+        for (WindowKey key : desiredWindowKeys) {
+            if (!key.worldKey().equals(worldKey)) {
+                continue;
+            }
+            BlockPos origin = key.origin();
+            if (chunkMaxX <= origin.getX()
+                || chunkMinX >= origin.getX() + GRID_SIZE
+                || chunkMaxZ <= origin.getZ()
+                || chunkMinZ >= origin.getZ() + GRID_SIZE) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
     private boolean chunkOverlapsBrickColumn(ChunkPos chunkPos, int brickX, int brickZ) {
         int chunkMinX = chunkPos.getStartX();
         int chunkMinZ = chunkPos.getStartZ();
@@ -752,6 +893,7 @@ public final class AeroServerRuntime {
                     resetMainThreadProfiling();
                     lastSyncedFlowFrameId = 0L;
                     lastCoarseWindSyncStates.clear();
+                    lastFlowAtlasSyncStates.clear();
                     zeroAtlasHoldUntilTick.clear();
                     streamingEnabled = true;
                     lastSolverError = "";
@@ -783,6 +925,7 @@ public final class AeroServerRuntime {
                             + " publishedRegions=" + (currentFrame == null ? 0 : currentFrame.regionAtlases().size())
                             + " probes=" + publishedPlayerProbes.get().size()
                             + " entitySamples=" + publishedEntitySamples.get().size()
+                            + " clientLocalL2=" + clientLocalL2Players.size()
                             + " l0Cells=" + backgroundMetCellCount()
                             + " l1Cells=" + mesoscaleMetCellCount()
                             + " simBridge=" + simulationBridge.runtimeInfo()
@@ -807,6 +950,18 @@ public final class AeroServerRuntime {
                             + " coordSolveAge=" + currentCoordinatorSolveCompleteAgeTicks()
                             + " coordWaitMs=" + format3(nanosToMillis(lastCoordinatorWaitNanos))
                             + " coordPostMs=" + format3(nanosToMillis(lastCoordinatorPostSolveNanos))
+                            + " bgRefreshAge=" + ageTicks(lastBackgroundRefreshAppliedTick)
+                            + " bgRefreshWorlds=" + lastBackgroundRefreshWorldCount
+                            + " bgRefreshMs=" + format3(nanosToMillis(lastBackgroundRefreshNanos))
+                            + " bgDiagMs=" + format3(nanosToMillis(lastBackgroundDiagnosticsNanos))
+                            + " bgDriverMs=" + format3(nanosToMillis(lastBackgroundDriverNanos))
+                            + " bgL0Ms=" + format3(nanosToMillis(lastBackgroundL0Nanos))
+                            + " bgL1Ms=" + format3(nanosToMillis(lastBackgroundL1Nanos))
+                            + " bgFeedbackMs=" + format3(nanosToMillis(lastBackgroundFeedbackNanos))
+                            + " deltaFlush=" + lastWorldDeltaFlushCount + "/" + pendingWorldDeltaCount
+                            + " deltaFlushMs=" + format3(nanosToMillis(lastWorldDeltaFlushNanos))
+                            + " staticRefresh=" + lastResidentBrickStaticRefreshCount + "/" + pendingResidentBrickStaticRefreshCount
+                            + " staticRefreshMs=" + format3(nanosToMillis(lastResidentBrickStaticRefreshNanos))
                             + " coordAppliedMax=" + format3(lastCoordinatorAppliedMaxSpeed)
                             + " coordPublishedMax=" + format3(lastCoordinatorPublishedMaxSpeed)
                             + " coordNoPublish=" + (lastCoordinatorNoPublishReason.isEmpty() ? "-" : lastCoordinatorNoPublishReason)
@@ -2394,6 +2549,11 @@ public final class AeroServerRuntime {
         appendJsonArray(builder, "forcing_geostrophic_wind_z", snapshot.forcingGeostrophicWindZ(), true);
         appendJsonArray(builder, "forcing_wind_shear_x_per_block", snapshot.forcingWindShearXPerBlock(), true);
         appendJsonArray(builder, "forcing_wind_shear_z_per_block", snapshot.forcingWindShearZPerBlock(), true);
+        appendJsonArray(builder, "abl_height_blocks", snapshot.ablHeightBlocks(), true);
+        appendJsonArray(builder, "abl_height_agl_blocks", snapshot.ablHeightAglBlocks(), true);
+        appendJsonArray(builder, "abl_stability", snapshot.ablStability(), true);
+        appendJsonArray(builder, "abl_mixing_strength", snapshot.ablMixingStrength(), true);
+        appendJsonArray(builder, "abl_profile_blend", snapshot.ablProfileBlend(), true);
         appendJsonArray(builder, "forcing_nested_ambient_delta_kelvin", snapshot.forcingNestedAmbientDeltaKelvin(), true);
         appendJsonArray(builder, "forcing_nested_surface_delta_kelvin", snapshot.forcingNestedSurfaceDeltaKelvin(), true);
         appendJsonArray(builder, "forcing_nested_wind_x_delta", snapshot.forcingNestedWindXDelta(), true);
@@ -2642,11 +2802,11 @@ public final class AeroServerRuntime {
         ensureSimulationCoordinatorRunning();
         recordMainThreadPhase(MAIN_THREAD_PHASE_COORDINATOR, System.nanoTime() - phaseStartNanos);
 
-        boolean shouldSyncFlow = tickCounter % PARTICLE_FLOW_SYNC_INTERVAL_TICKS == 0;
+        boolean shouldSyncCoarseFlow = tickCounter % COARSE_FLOW_SYNC_INTERVAL_TICKS == 0;
         PublishedFrame frame = publishedFrame.get();
         if (frame == null || frame.regionAtlases().isEmpty()) {
             lastSyncedFlowFrameId = 0L;
-            if (shouldSyncFlow) {
+            if (shouldSyncCoarseFlow) {
                 phaseStartNanos = System.nanoTime();
                 syncCoarseWindToPlayers(server);
                 recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, System.nanoTime() - phaseStartNanos);
@@ -2659,19 +2819,20 @@ public final class AeroServerRuntime {
             return;
         }
 
-        if (shouldSyncFlow) {
-            phaseStartNanos = System.nanoTime();
+        phaseStartNanos = System.nanoTime();
+        if (shouldSyncCoarseFlow) {
             syncCoarseWindToPlayers(server);
-            if (frame.frameId() > lastSyncedFlowFrameId) {
-                syncPublishedFlowToPlayers(server, frame);
-                lastSyncedFlowFrameId = frame.frameId();
-            }
-            tickL2Capture(server);
-            recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, System.nanoTime() - phaseStartNanos);
-        } else {
-            tickL2Capture(server);
-            recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, 0L);
         }
+        if (SERVER_L2_ATLAS_STREAMING_ENABLED) {
+            syncPublishedFlowToPlayers(server, frame);
+        } else {
+            lastFlowAtlasSyncStates.clear();
+        }
+        if (frame.frameId() > lastSyncedFlowFrameId) {
+            lastSyncedFlowFrameId = frame.frameId();
+        }
+        tickL2Capture(server);
+        recordMainThreadPhase(MAIN_THREAD_PHASE_FLOW_SYNC, System.nanoTime() - phaseStartNanos);
         long frameId = frame.frameId();
         int publishedSteps = 0;
         if (frameId > lastObservedPublishedFrameId) {
@@ -2840,6 +3001,7 @@ public final class AeroServerRuntime {
         solveWindowRetainUntilTick.clear();
         playerMotionAnchorStates.clear();
         lastCoarseWindSyncStates.clear();
+        lastFlowAtlasSyncStates.clear();
         zeroAtlasHoldUntilTick.clear();
         mirrorOnlyPrewarmedWindowKeys.clear();
         mirrorOnlyUploadedBrickStaticSignatures.clear();
@@ -2854,9 +3016,11 @@ public final class AeroServerRuntime {
         publishedEntitySamples.set(Map.of());
         synchronized (pendingWorldDeltasLock) {
             pendingWorldDeltas.clear();
+            pendingWorldDeltaCount = 0;
         }
         synchronized (pendingResidentBrickStaticRefreshesLock) {
             pendingResidentBrickStaticRefreshes.clear();
+            pendingResidentBrickStaticRefreshCount = 0;
         }
         waitForSolverIdle();
         releaseSimulationService();
@@ -2894,88 +3058,165 @@ public final class AeroServerRuntime {
         return new BackgroundRefreshBatch(tickCounter, Map.copyOf(requests));
     }
 
-    private void applyBackgroundRefreshBatch(BackgroundRefreshBatch batch) {
+    private List<BackgroundRefreshWork> prepareBackgroundRefreshBatch(BackgroundRefreshBatch batch) {
+        if (batch == null) {
+            return List.of();
+        }
+        List<MesoscaleGrid> gridsToClose = new ArrayList<>();
+        List<BackgroundRefreshWork> works = new ArrayList<>(batch.requests().size());
         Set<RegistryKey<World>> activeWorldKeys = new HashSet<>(batch.requests().keySet());
-        backgroundMetGrids.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
-        pendingNestedFeedbackBins.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
-        nestedFeedbackRuntimeDiagnostics.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
-        Iterator<Map.Entry<RegistryKey<World>, MesoscaleGrid>> mesoscaleIterator = mesoscaleMetGrids.entrySet().iterator();
-        while (mesoscaleIterator.hasNext()) {
-            Map.Entry<RegistryKey<World>, MesoscaleGrid> entry = mesoscaleIterator.next();
-            if (activeWorldKeys.contains(entry.getKey())) {
-                continue;
+        synchronized (simulationStateLock) {
+            backgroundMetGrids.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
+            pendingNestedFeedbackBins.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
+            nestedFeedbackRuntimeDiagnostics.keySet().removeIf(worldKey -> !activeWorldKeys.contains(worldKey));
+            Iterator<Map.Entry<RegistryKey<World>, MesoscaleGrid>> mesoscaleIterator = mesoscaleMetGrids.entrySet().iterator();
+            while (mesoscaleIterator.hasNext()) {
+                Map.Entry<RegistryKey<World>, MesoscaleGrid> entry = mesoscaleIterator.next();
+                if (activeWorldKeys.contains(entry.getKey())) {
+                    continue;
+                }
+                gridsToClose.add(entry.getValue());
+                mesoscaleIterator.remove();
             }
-            entry.getValue().close();
-            mesoscaleIterator.remove();
-        }
 
-        for (Map.Entry<RegistryKey<World>, BackgroundRefreshRequest> entry : batch.requests().entrySet()) {
-            RegistryKey<World> worldKey = entry.getKey();
-            BackgroundRefreshRequest request = entry.getValue();
-            MesoscaleGrid existingMesoscale = mesoscaleMetGrids.get(worldKey);
-            MesoscaleGrid.DiagnosticsSummary diagnosticsSummary = existingMesoscale == null
-                ? null
-                : existingMesoscale.diagnosticsSummary(request.focus());
-            WorldScaleDriver driver = worldScaleDrivers.computeIfAbsent(
-                worldKey,
-                ignored -> loadWorldScaleDriver(request.world())
-            );
-            driver.advance(
-                request.world(),
-                request.environmentSnapshot(),
-                batch.tickCounter(),
-                SOLVER_STEP_SECONDS,
-                diagnosticsSummary,
-                existingMesoscale,
-                request.focus()
-            );
-            BackgroundMetGrid grid = backgroundMetGrids.computeIfAbsent(
-                worldKey,
-                ignored -> new BackgroundMetGrid(
-                    BACKGROUND_MET_CELL_SIZE_BLOCKS,
-                    BACKGROUND_MET_RADIUS_CELLS,
-                    BACKGROUND_MET_REFRESH_TICKS
-                )
-            );
-            grid.refresh(
-                request.world(),
-                request.environmentSnapshot(),
-                request.focus(),
-                batch.tickCounter(),
-                SOLVER_STEP_SECONDS,
-                seedTerrainProvider,
-                driver
-            );
-            MesoscaleGrid mesoscale = mesoscaleMetGrids.computeIfAbsent(
-                worldKey,
-                ignored -> new MesoscaleGrid(
-                    MESOSCALE_MET_CELL_SIZE_BLOCKS,
-                    MESOSCALE_MET_RADIUS_CELLS,
-                    MESOSCALE_MET_LAYER_HEIGHT_BLOCKS,
-                    MESOSCALE_MET_MAX_LAYERS,
-                    MESOSCALE_STEP_SECONDS,
-                    MESOSCALE_FORCING_REBUILD_TICKS
-                )
-            );
-            mesoscale.refresh(request.world(), request.focus(), batch.tickCounter(), SOLVER_STEP_SECONDS, seedTerrainProvider, grid);
-            mesoscale.applyPendingNestedFeedback(drainPendingNestedFeedback(worldKey));
+            for (Map.Entry<RegistryKey<World>, BackgroundRefreshRequest> entry : batch.requests().entrySet()) {
+                RegistryKey<World> worldKey = entry.getKey();
+                works.add(new BackgroundRefreshWork(
+                    batch.tickCounter(),
+                    worldKey,
+                    entry.getValue(),
+                    worldScaleDrivers.get(worldKey),
+                    backgroundMetGrids.get(worldKey),
+                    mesoscaleMetGrids.get(worldKey),
+                    pendingNestedFeedbackBins.get(worldKey)
+                ));
+            }
         }
+        for (MesoscaleGrid grid : gridsToClose) {
+            grid.close();
+        }
+        return works;
     }
 
-    private List<MesoscaleGrid.NestedFeedbackBin> drainPendingNestedFeedback(RegistryKey<World> worldKey) {
-        ConcurrentLinkedQueue<MesoscaleGrid.NestedFeedbackBin> queue = pendingNestedFeedbackBins.get(worldKey);
+    private BackgroundRefreshTiming applyPreparedBackgroundRefreshWork(BackgroundRefreshWork work) {
+        if (work == null || work.request() == null) {
+            return BackgroundRefreshTiming.EMPTY;
+        }
+        RegistryKey<World> worldKey = work.worldKey();
+        BackgroundRefreshRequest request = work.request();
+        WorldScaleDriver driver = work.driver();
+        boolean newDriver = driver == null;
+        if (newDriver) {
+            driver = loadWorldScaleDriver(request.world());
+        }
+        BackgroundMetGrid grid = work.backgroundGrid();
+        boolean newBackgroundGrid = grid == null;
+        if (newBackgroundGrid) {
+            grid = new BackgroundMetGrid(
+                BACKGROUND_MET_CELL_SIZE_BLOCKS,
+                BACKGROUND_MET_RADIUS_CELLS,
+                BACKGROUND_MET_REFRESH_TICKS
+            );
+        }
+        MesoscaleGrid mesoscale = work.mesoscaleGrid();
+        boolean newMesoscaleGrid = mesoscale == null;
+        if (newMesoscaleGrid) {
+            mesoscale = new MesoscaleGrid(
+                MESOSCALE_MET_CELL_SIZE_BLOCKS,
+                MESOSCALE_MET_RADIUS_CELLS,
+                MESOSCALE_MET_LAYER_HEIGHT_BLOCKS,
+                MESOSCALE_MET_MAX_LAYERS,
+                MESOSCALE_STEP_SECONDS,
+                MESOSCALE_FORCING_REBUILD_TICKS
+            );
+        }
+
+        long phaseStartNanos = System.nanoTime();
+        MesoscaleGrid.DiagnosticsSummary diagnosticsSummary = mesoscale.diagnosticsSummary(request.focus());
+        long diagnosticsNanos = System.nanoTime() - phaseStartNanos;
+        phaseStartNanos = System.nanoTime();
+        driver.advance(
+            request.world(),
+            request.environmentSnapshot(),
+            work.tickCounter(),
+            SOLVER_STEP_SECONDS,
+            diagnosticsSummary,
+            mesoscale,
+            request.focus()
+        );
+        long driverNanos = System.nanoTime() - phaseStartNanos;
+        phaseStartNanos = System.nanoTime();
+        grid.refresh(
+            request.world(),
+            request.environmentSnapshot(),
+            request.focus(),
+            work.tickCounter(),
+            SOLVER_STEP_SECONDS,
+            seedTerrainProvider,
+            driver
+        );
+        long l0Nanos = System.nanoTime() - phaseStartNanos;
+        phaseStartNanos = System.nanoTime();
+        mesoscale.refresh(request.world(), request.focus(), work.tickCounter(), SOLVER_STEP_SECONDS, seedTerrainProvider, grid);
+        long l1Nanos = System.nanoTime() - phaseStartNanos;
+        phaseStartNanos = System.nanoTime();
+        mesoscale.applyPendingNestedFeedback(drainPendingNestedFeedback(work.feedbackQueue()));
+        long feedbackNanos = System.nanoTime() - phaseStartNanos;
+
+        if (newDriver || newBackgroundGrid || newMesoscaleGrid) {
+            WorldScaleDriver finalDriver = driver;
+            BackgroundMetGrid finalGrid = grid;
+            MesoscaleGrid finalMesoscale = mesoscale;
+            synchronized (simulationStateLock) {
+                worldScaleDrivers.putIfAbsent(worldKey, finalDriver);
+                backgroundMetGrids.putIfAbsent(worldKey, finalGrid);
+                mesoscaleMetGrids.putIfAbsent(worldKey, finalMesoscale);
+            }
+        }
+        return new BackgroundRefreshTiming(diagnosticsNanos, driverNanos, l0Nanos, l1Nanos, feedbackNanos);
+    }
+
+    private void applyBackgroundRefreshBatch(BackgroundRefreshBatch batch) {
+        long refreshStartNanos = System.nanoTime();
+        long diagnosticsNanos = 0L;
+        long driverNanos = 0L;
+        long l0Nanos = 0L;
+        long l1Nanos = 0L;
+        long feedbackNanos = 0L;
+        List<BackgroundRefreshWork> works = prepareBackgroundRefreshBatch(batch);
+        for (BackgroundRefreshWork work : works) {
+            BackgroundRefreshTiming timing = applyPreparedBackgroundRefreshWork(work);
+            diagnosticsNanos += timing.diagnosticsNanos();
+            driverNanos += timing.driverNanos();
+            l0Nanos += timing.l0Nanos();
+            l1Nanos += timing.l1Nanos();
+            feedbackNanos += timing.feedbackNanos();
+        }
+        lastBackgroundRefreshAppliedTick = batch == null ? Integer.MIN_VALUE : batch.tickCounter();
+        lastBackgroundRefreshWorldCount = works.size();
+        lastBackgroundRefreshNanos = System.nanoTime() - refreshStartNanos;
+        lastBackgroundDiagnosticsNanos = diagnosticsNanos;
+        lastBackgroundDriverNanos = driverNanos;
+        lastBackgroundL0Nanos = l0Nanos;
+        lastBackgroundL1Nanos = l1Nanos;
+        lastBackgroundFeedbackNanos = feedbackNanos;
+    }
+
+    private List<MesoscaleGrid.NestedFeedbackBin> drainPendingNestedFeedback(ConcurrentLinkedQueue<MesoscaleGrid.NestedFeedbackBin> queue) {
         if (queue == null || queue.isEmpty()) {
             return List.of();
         }
         List<MesoscaleGrid.NestedFeedbackBin> drained = new ArrayList<>();
-        while (true) {
-            MesoscaleGrid.NestedFeedbackBin bin = queue.poll();
-            if (bin == null) {
-                break;
-            }
+        MesoscaleGrid.NestedFeedbackBin bin;
+        while ((bin = queue.poll()) != null) {
             drained.add(bin);
         }
-        return drained.isEmpty() ? List.of() : drained;
+        return drained;
+    }
+
+    private List<MesoscaleGrid.NestedFeedbackBin> drainPendingNestedFeedback(RegistryKey<World> worldKey) {
+        ConcurrentLinkedQueue<MesoscaleGrid.NestedFeedbackBin> queue = pendingNestedFeedbackBins.get(worldKey);
+        return drainPendingNestedFeedback(queue);
     }
 
     private void ensureSimulationServiceInitialized() {
@@ -3034,51 +3275,99 @@ public final class AeroServerRuntime {
             return;
         }
         synchronized (pendingWorldDeltasLock) {
-            pendingWorldDeltas.addLast(delta);
+            WorldDeltaQueueKey key = worldDeltaQueueKey(delta);
+            pendingWorldDeltas.remove(key);
+            pendingWorldDeltas.put(key, delta);
+            pendingWorldDeltaCount = pendingWorldDeltas.size();
         }
     }
 
-    private void flushPendingWorldDeltas() {
+    private WorldDeltaQueueKey worldDeltaQueueKey(NativeSimulationBridge.WorldDelta delta) {
+        int group = switch (delta.type()) {
+            case NativeSimulationBridge.WORLD_DELTA_CHUNK_LOADED,
+                NativeSimulationBridge.WORLD_DELTA_CHUNK_UNLOADED -> NativeSimulationBridge.WORLD_DELTA_CHUNK_LOADED;
+            case NativeSimulationBridge.WORLD_DELTA_BLOCK_ENTITY_LOADED,
+                NativeSimulationBridge.WORLD_DELTA_BLOCK_ENTITY_UNLOADED -> NativeSimulationBridge.WORLD_DELTA_BLOCK_ENTITY_LOADED;
+            default -> delta.type();
+        };
+        return new WorldDeltaQueueKey(group, delta.x(), delta.y(), delta.z(), delta.data0());
+    }
+
+    private int flushPendingWorldDeltas(int maxBatches) {
+        long startNanos = System.nanoTime();
+        int submittedCount = 0;
         long serviceId = simulationServiceId;
         if (serviceId == 0L) {
-            return;
+            lastWorldDeltaFlushCount = 0;
+            lastWorldDeltaFlushNanos = System.nanoTime() - startNanos;
+            return 0;
         }
-        while (true) {
+        int batches = Math.max(0, maxBatches);
+        for (int batchIndex = 0; batchIndex < batches; batchIndex++) {
             NativeSimulationBridge.WorldDelta[] batch;
             synchronized (pendingWorldDeltasLock) {
                 if (pendingWorldDeltas.isEmpty()) {
-                    return;
+                    pendingWorldDeltaCount = 0;
+                    break;
                 }
                 int batchSize = Math.min(WORLD_DELTA_FLUSH_BATCH_SIZE, pendingWorldDeltas.size());
                 batch = new NativeSimulationBridge.WorldDelta[batchSize];
+                Iterator<Map.Entry<WorldDeltaQueueKey, NativeSimulationBridge.WorldDelta>> iterator =
+                    pendingWorldDeltas.entrySet().iterator();
                 for (int i = 0; i < batchSize; i++) {
-                    batch[i] = pendingWorldDeltas.removeFirst();
+                    Map.Entry<WorldDeltaQueueKey, NativeSimulationBridge.WorldDelta> entry = iterator.next();
+                    batch[i] = entry.getValue();
+                    iterator.remove();
                 }
+                pendingWorldDeltaCount = pendingWorldDeltas.size();
             }
-            simulationBridge.submitWorldDeltas(serviceId, batch);
+            if (!simulationBridge.submitWorldDeltas(serviceId, batch)) {
+                lastSolverError = simulationBridge.lastError();
+            } else {
+                submittedCount += batch.length;
+            }
         }
+        lastWorldDeltaFlushCount = submittedCount;
+        lastWorldDeltaFlushNanos = System.nanoTime() - startNanos;
+        return submittedCount;
     }
 
-    private void applyPendingResidentBrickStaticRefreshesIfNeeded() {
+    private int applyPendingResidentBrickStaticRefreshesIfNeeded(int maxRefreshes) {
+        long startNanos = System.nanoTime();
+        int refreshedCount = 0;
         long serviceId = simulationServiceId;
         MinecraftServer server = currentServer;
         if (serviceId == 0L || server == null) {
-            return;
+            lastResidentBrickStaticRefreshCount = 0;
+            lastResidentBrickStaticRefreshNanos = System.nanoTime() - startNanos;
+            return 0;
         }
-        while (true) {
+        int budget = Math.max(0, maxRefreshes);
+        while (refreshedCount < budget) {
             ChunkResidentBrickRefreshRequest request;
             synchronized (pendingResidentBrickStaticRefreshesLock) {
-                request = pendingResidentBrickStaticRefreshes.pollFirst();
+                Iterator<ChunkResidentBrickRefreshRequest> iterator = pendingResidentBrickStaticRefreshes.iterator();
+                if (iterator.hasNext()) {
+                    request = iterator.next();
+                    iterator.remove();
+                } else {
+                    request = null;
+                }
+                pendingResidentBrickStaticRefreshCount = pendingResidentBrickStaticRefreshes.size();
             }
             if (request == null) {
-                return;
+                break;
             }
             ServerWorld world = server.getWorld(request.worldKey());
             if (world == null) {
                 continue;
             }
             refreshResidentBrickStaticsForChunk(world, new ChunkPos(request.chunkX(), request.chunkZ()));
+            refreshedCount++;
         }
+        lastResidentBrickStaticRefreshCount = refreshedCount;
+        lastResidentBrickStaticRefreshNanos = System.nanoTime() - startNanos;
+        return refreshedCount;
     }
 
     private BackgroundMetGrid.Sample sampleBackgroundMet(RegistryKey<World> worldKey, BlockPos pos) {
@@ -3122,6 +3411,7 @@ public final class AeroServerRuntime {
 
     private void shutdownAll(MinecraftServer server) {
         stopStreaming(server, true);
+        clientLocalL2Players.clear();
         synchronized (simulationStateLock) {
             worldMirror.close();
         }
@@ -3273,6 +3563,10 @@ public final class AeroServerRuntime {
                 BlockPos playerPos = player.getBlockPos().toImmutable();
                 BlockPos coreOrigin = coreOriginForPosition(playerPos);
                 observedPlayers.add(playerId);
+                if (usesClientLocalL2(player)) {
+                    playerMotionAnchorStates.remove(playerId);
+                    continue;
+                }
                 anchors.add(new PlayerRegionAnchor(worldKey, coreOrigin, playerPos));
                 appendPlayerMotionTrailAnchors(playerId, worldKey, playerPos, coreOrigin, anchors);
                 playerMotionAnchorStates.put(
@@ -5903,6 +6197,7 @@ public final class AeroServerRuntime {
     ) {
         int cells = sizeX * sizeY * sizeZ;
         float[] windX = new float[cells];
+        float[] windY = new float[cells];
         float[] windZ = new float[cells];
         if (!mesoscaleGrid.seedL2Window(
             origin,
@@ -5910,6 +6205,7 @@ public final class AeroServerRuntime {
             sizeY,
             sizeZ,
             windX,
+            windY,
             windZ,
             airTemperatureState,
             surfaceTemperatureState
@@ -5922,9 +6218,9 @@ public final class AeroServerRuntime {
             }
             int base = cell * RESPONSE_CHANNELS;
             flowState[base] = windX[cell] / NATIVE_VELOCITY_SCALE;
+            flowState[base + 1] = windY[cell] / NATIVE_VELOCITY_SCALE;
             flowState[base + 2] = windZ[cell] / NATIVE_VELOCITY_SCALE;
         }
-        deriveSeedVerticalVelocity(sizeX, sizeY, sizeZ, obstacleMask, flowState);
         return true;
     }
 
@@ -5942,7 +6238,9 @@ public final class AeroServerRuntime {
         BlockPos center = origin.add(sizeX / 2, sizeY / 2, sizeZ / 2);
         NestedBoundaryCoupler.BoundarySample boundarySample = sampleNestedBoundaryAtPosition(worldKey, center);
         float seedVx = boundarySample == null ? 0.0f : boundarySample.windX() / NATIVE_VELOCITY_SCALE;
+        float seedVy = boundarySample == null ? 0.0f : boundarySample.windY() / NATIVE_VELOCITY_SCALE;
         float seedVz = boundarySample == null ? 0.0f : boundarySample.windZ() / NATIVE_VELOCITY_SCALE;
+        boolean seedVyAvailable = boundarySample != null && boundarySample.verticalWindAvailable();
         float seedAirTemperature = boundarySample == null
             ? THERMAL_BASE_AMBIENT_AIR_TEMPERATURE_K
             : boundarySample.ambientAirTemperatureKelvin();
@@ -5958,9 +6256,12 @@ public final class AeroServerRuntime {
             }
             int base = cell * RESPONSE_CHANNELS;
             flowState[base] = seedVx;
+            flowState[base + 1] = seedVy;
             flowState[base + 2] = seedVz;
         }
-        deriveSeedVerticalVelocity(sizeX, sizeY, sizeZ, obstacleMask, flowState);
+        if (!seedVyAvailable) {
+            deriveSeedVerticalVelocity(sizeX, sizeY, sizeZ, obstacleMask, flowState);
+        }
     }
 
     private void deriveSeedVerticalVelocity(int sizeX, int sizeY, int sizeZ, byte[] obstacleMask, float[] flowState) {
@@ -6761,9 +7062,12 @@ public final class AeroServerRuntime {
     ) {
         for (int u = 0; u < resolution; u++) {
             float[] vxColumn = new float[resolution];
+            float[] sampledVyColumn = new float[resolution];
             float[] vzColumn = new float[resolution];
             float[] tempColumn = new float[resolution];
             float[] divColumn = new float[resolution];
+            boolean[] sampledVyAvailable = new boolean[resolution];
+            boolean needsDerivedVy = false;
             float maxHorizontalSpeed = 0.0f;
             for (int v = 0; v < resolution; v++) {
                 double horizontal = lerp(horizontalMin, horizontalMax, (u + 0.5) / resolution);
@@ -6775,16 +7079,26 @@ public final class AeroServerRuntime {
                 };
                 NestedMetState state = sampleNestedMetState(worldKey, samplePos, fallback);
                 vxColumn[v] = state.windX();
+                sampledVyColumn[v] = state.windY();
+                sampledVyAvailable[v] = state.verticalWindAvailable();
                 vzColumn[v] = state.windZ();
                 tempColumn[v] = state.airTemperatureKelvin();
-                divColumn[v] = sampleHorizontalDivergence(worldKey, samplePos, fallback);
+                if (state.verticalWindAvailable()) {
+                    divColumn[v] = 0.0f;
+                } else {
+                    divColumn[v] = sampleHorizontalDivergence(worldKey, samplePos, fallback);
+                    needsDerivedVy = true;
+                }
                 maxHorizontalSpeed = Math.max(maxHorizontalSpeed, (float) Math.sqrt(state.windX() * state.windX() + state.windZ() * state.windZ()));
             }
-            float[] vyColumn = integrateVerticalVelocity(divColumn, maxHorizontalSpeed, (float) ((maxY - minY) / Math.max(1, resolution - 1)));
+            float[] derivedVyColumn = needsDerivedVy
+                ? integrateVerticalVelocity(divColumn, maxHorizontalSpeed, (float) ((maxY - minY) / Math.max(1, resolution - 1)))
+                : null;
             for (int v = 0; v < resolution; v++) {
                 int index = boundaryFaceIndex(face, u, v, resolution);
+                float vy = sampledVyAvailable[v] ? sampledVyColumn[v] : derivedVyColumn[v];
                 windX[index] = vxColumn[v] / NATIVE_VELOCITY_SCALE;
-                windY[index] = vyColumn[v] / NATIVE_VELOCITY_SCALE;
+                windY[index] = vy / NATIVE_VELOCITY_SCALE;
                 windZ[index] = vzColumn[v] / NATIVE_VELOCITY_SCALE;
                 airTemperature[index] = tempColumn[v];
             }
@@ -6814,7 +7128,9 @@ public final class AeroServerRuntime {
                 double z = lerp(minZ, maxZ, (v + 0.5) / resolution);
                 BlockPos samplePos = BlockPos.ofFloored(x, fixedY, z);
                 NestedMetState state = sampleNestedMetState(worldKey, samplePos, fallback);
-                float vy = sampleColumnVerticalVelocity(worldKey, x, z, columnMinY, columnMaxY, face == Direction.DOWN.ordinal() ? 0 : resolution - 1, resolution, fallback);
+                float vy = state.verticalWindAvailable()
+                    ? state.windY()
+                    : sampleColumnVerticalVelocity(worldKey, x, z, columnMinY, columnMaxY, face == Direction.DOWN.ordinal() ? 0 : resolution - 1, resolution, fallback);
                 int index = boundaryFaceIndex(face, u, v, resolution);
                 windX[index] = state.windX() / NATIVE_VELOCITY_SCALE;
                 windY[index] = vy / NATIVE_VELOCITY_SCALE;
@@ -6891,16 +7207,30 @@ public final class AeroServerRuntime {
     ) {
         MesoscaleGrid.Sample mesoscale = sampleMesoscaleMet(worldKey, pos);
         if (mesoscale != null) {
-            return new NestedMetState(mesoscale.windX(), mesoscale.windZ(), mesoscale.ambientAirTemperatureKelvin());
+            return new NestedMetState(
+                mesoscale.windX(),
+                mesoscale.windY(),
+                mesoscale.windZ(),
+                mesoscale.ambientAirTemperatureKelvin(),
+                true
+            );
         }
         BackgroundMetGrid.Sample background = sampleBackgroundMet(worldKey, pos);
         if (background != null) {
-            return new NestedMetState(background.backgroundWindX(), background.backgroundWindZ(), background.ambientAirTemperatureKelvin());
+            return new NestedMetState(
+                background.backgroundWindX(),
+                0.0f,
+                background.backgroundWindZ(),
+                background.ambientAirTemperatureKelvin(),
+                false
+            );
         }
         return new NestedMetState(
             fallback == null ? 0.0f : fallback.windX(),
+            fallback == null ? 0.0f : fallback.windY(),
             fallback == null ? 0.0f : fallback.windZ(),
-            fallback == null ? THERMAL_BASE_AMBIENT_AIR_TEMPERATURE_K : fallback.ambientAirTemperatureKelvin()
+            fallback == null ? THERMAL_BASE_AMBIENT_AIR_TEMPERATURE_K : fallback.ambientAirTemperatureKelvin(),
+            fallback != null && fallback.verticalWindAvailable()
         );
     }
 
@@ -7303,9 +7633,12 @@ public final class AeroServerRuntime {
 
     private AeroWindSample sampleWindLocked(RegistryKey<World> worldKey, BlockPos probePos, SamplePolicy policy) {
         SamplePolicy effectivePolicy = policy == null ? SamplePolicy.GAMEPLAY_SERVER_ONLY : policy;
-        SampledPoint brickSample = sampleBrickRuntimePointLocked(worldKey, probePos);
+        SampledPoint brickSample = effectivePolicy.allowServerAggregatedL2()
+            ? sampleBrickRuntimePointLocked(worldKey, probePos)
+            : null;
         if (brickSample != null) {
-            return AeroWindSample.serverAuthoritative(
+            AeroWindSample coarseBackground = sampleCoarseWindLocked(worldKey, probePos);
+            AeroWindSample resolved = AeroWindSample.serverAuthoritative(
                 brickSample.velocityX(),
                 brickSample.velocityY(),
                 brickSample.velocityZ(),
@@ -7314,6 +7647,32 @@ public final class AeroServerRuntime {
                 AeroWindSample.UNKNOWN_EPOCH,
                 AeroWindSample.UNKNOWN_EPOCH,
                 tickCounter
+            );
+            if (coarseBackground.hasAtmosphericDiagnostics()) {
+                return resolved.withAtmosphere(
+                    brickSample.airTemperatureKelvin(),
+                    coarseBackground.humidity(),
+                    coarseBackground.turbulenceIntensity(),
+                    coarseBackground.gustX(),
+                    coarseBackground.gustY(),
+                    coarseBackground.gustZ(),
+                    coarseBackground.windShearXPerBlock(),
+                    coarseBackground.windShearZPerBlock(),
+                    coarseBackground.ablStability(),
+                    coarseBackground.ablMixingStrength()
+                );
+            }
+            return resolved.withAtmosphere(
+                brickSample.airTemperatureKelvin(),
+                AeroWindSample.UNKNOWN_SCALAR,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f
             );
         }
         if (!effectivePolicy.allowServerCoarse()) {
@@ -7325,19 +7684,30 @@ public final class AeroServerRuntime {
     private AeroWindSample sampleCoarseWindLocked(RegistryKey<World> worldKey, BlockPos probePos) {
         MesoscaleGrid.Sample mesoscaleSample = sampleMesoscaleMet(worldKey, probePos);
         if (mesoscaleSample != null) {
-            float horizontalSpeed = (float) Math.sqrt(
-                mesoscaleSample.windX() * mesoscaleSample.windX()
-                    + mesoscaleSample.windZ() * mesoscaleSample.windZ()
-            );
-            return AeroWindSample.serverAuthoritative(
+            float horizontalSpeed = windSpeed(mesoscaleSample.windX(), mesoscaleSample.windZ());
+            BackgroundMetGrid.Sample backgroundSample = sampleBackgroundMet(worldKey, probePos);
+            AeroWindSample sample = AeroWindSample.serverAuthoritative(
                 mesoscaleSample.windX(),
                 sampleCoarseVerticalVelocityLocked(worldKey, probePos, horizontalSpeed),
                 mesoscaleSample.windZ(),
-                0.0f,
+                backgroundSample == null ? 0.0f : backgroundSample.pressureAnomalyPa(),
                 AeroWindSample.Level.L1,
                 tickCounter,
                 AeroWindSample.UNKNOWN_EPOCH,
                 AeroWindSample.UNKNOWN_EPOCH
+            );
+            float turbulence = l1TurbulenceIntensity(mesoscaleSample, horizontalSpeed);
+            return sample.withAtmosphere(
+                mesoscaleSample.ambientAirTemperatureKelvin(),
+                mesoscaleSample.humidity(),
+                turbulence,
+                gustComponent(probePos, tickCounter, 0, turbulence),
+                gustComponent(probePos, tickCounter, 1, turbulence) * 0.35f,
+                gustComponent(probePos, tickCounter, 2, turbulence),
+                mesoscaleSample.windShearXPerBlock(),
+                mesoscaleSample.windShearZPerBlock(),
+                mesoscaleSample.ablStability(),
+                mesoscaleSample.ablMixingStrength()
             );
         }
         BackgroundMetGrid.Sample backgroundSample = sampleBackgroundMet(worldKey, probePos);
@@ -7346,18 +7716,85 @@ public final class AeroServerRuntime {
                 backgroundSample.backgroundWindX() * backgroundSample.backgroundWindX()
                     + backgroundSample.backgroundWindZ() * backgroundSample.backgroundWindZ()
             );
-            return AeroWindSample.serverAuthoritative(
+            AeroWindSample sample = AeroWindSample.serverAuthoritative(
                 backgroundSample.backgroundWindX(),
                 sampleCoarseVerticalVelocityLocked(worldKey, probePos, horizontalSpeed),
                 backgroundSample.backgroundWindZ(),
-                0.0f,
+                backgroundSample.pressureAnomalyPa(),
                 AeroWindSample.Level.L0,
                 AeroWindSample.UNKNOWN_EPOCH,
                 AeroWindSample.UNKNOWN_EPOCH,
                 AeroWindSample.UNKNOWN_EPOCH
             );
+            float turbulence = l0TurbulenceIntensity(backgroundSample, horizontalSpeed);
+            return sample.withAtmosphere(
+                backgroundSample.ambientAirTemperatureKelvin(),
+                backgroundSample.humidity(),
+                turbulence,
+                gustComponent(probePos, tickCounter, 0, turbulence),
+                gustComponent(probePos, tickCounter, 1, turbulence) * 0.25f,
+                gustComponent(probePos, tickCounter, 2, turbulence),
+                0.0f,
+                0.0f,
+                0.0f,
+                MathHelper.clamp(backgroundSample.convectiveEnvelope(), 0.0f, 1.0f)
+            );
         }
         return AeroWindSample.ZERO;
+    }
+
+    private float windSpeed(float windX, float windZ) {
+        if (!Float.isFinite(windX) || !Float.isFinite(windZ)) {
+            return 0.0f;
+        }
+        return (float) Math.sqrt(windX * windX + windZ * windZ);
+    }
+
+    private float l1TurbulenceIntensity(MesoscaleGrid.Sample sample, float horizontalSpeed) {
+        if (sample == null) {
+            return 0.0f;
+        }
+        float shear = (float) Math.sqrt(
+            sample.windShearXPerBlock() * sample.windShearXPerBlock()
+                + sample.windShearZPerBlock() * sample.windShearZPerBlock()
+        );
+        float roughness = MathHelper.clamp(sample.roughnessLengthMeters() / 2.0f, 0.0f, 1.0f);
+        float mixing = MathHelper.clamp(sample.ablMixingStrength(), 0.0f, 1.0f);
+        float instability = Math.max(0.0f, sample.ablStability());
+        float nearSurface = 1.0f - MathHelper.clamp(sample.ablHeightAglBlocks() / Math.max(1.0f, sample.ablHeightBlocks()), 0.0f, 1.0f);
+        float speedTerm = horizontalSpeed * (0.025f + 0.050f * roughness + 0.045f * mixing);
+        float shearTerm = MathHelper.clamp(shear * 64.0f, 0.0f, 1.5f);
+        float buoyancyTerm = instability * mixing * 0.65f;
+        return MathHelper.clamp(
+            speedTerm + shearTerm + buoyancyTerm + nearSurface * roughness * 0.25f,
+            0.0f,
+            3.0f
+        );
+    }
+
+    private float l0TurbulenceIntensity(BackgroundMetGrid.Sample sample, float horizontalSpeed) {
+        if (sample == null) {
+            return 0.0f;
+        }
+        float convective = MathHelper.clamp(sample.convectiveEnvelope(), 0.0f, 1.0f);
+        float roughness = MathHelper.clamp(sample.roughnessLengthMeters() / 2.0f, 0.0f, 1.0f);
+        float thermal = MathHelper.clamp(
+            Math.max(0.0f, sample.surfaceTemperatureKelvin() - sample.ambientAirTemperatureKelvin()) / 8.0f,
+            0.0f,
+            1.0f
+        );
+        return MathHelper.clamp(horizontalSpeed * (0.018f + 0.040f * roughness) + convective * 0.75f + thermal * 0.35f, 0.0f, 2.0f);
+    }
+
+    private float gustComponent(BlockPos pos, long tick, int axis, float turbulenceIntensity) {
+        if (!(turbulenceIntensity > 0.0f) || !Float.isFinite(turbulenceIntensity)) {
+            return 0.0f;
+        }
+        double time = tick * 0.035 + axis * 11.37;
+        double phaseA = pos.getX() * 0.071 + pos.getY() * 0.031 + pos.getZ() * 0.053 + time;
+        double phaseB = pos.getX() * 0.017 - pos.getY() * 0.047 + pos.getZ() * 0.029 + time * 0.43 + axis * 3.19;
+        double gust = Math.sin(phaseA) * 0.62 + Math.sin(phaseB) * 0.38;
+        return (float) (gust * turbulenceIntensity * 0.42);
     }
 
     private SampledPoint sampleCoarsePointLocked(RegistryKey<World> worldKey, BlockPos probePos) {
@@ -7395,6 +7832,10 @@ public final class AeroServerRuntime {
         }
         float normalized = MathHelper.clamp(value / range, -1.0f, 1.0f);
         return (short) Math.round(normalized * 32767.0f);
+    }
+
+    private float finiteOrDefault(float value, float fallback) {
+        return Float.isFinite(value) ? value : fallback;
     }
 
     private float maxFlowSpeedMetersPerSecond(float[] flowState) {
@@ -7582,6 +8023,15 @@ public final class AeroServerRuntime {
 
     private void sendFlowSnapshotToPlayer(ServerPlayerEntity player, MinecraftServer server) {
         sendCoarseWindSnapshotToPlayer(player);
+        if (!SERVER_L2_ATLAS_STREAMING_ENABLED) {
+            return;
+        }
+        if (usesClientLocalL2(player)) {
+            return;
+        }
+        if (isFastPlayerForL2(player)) {
+            return;
+        }
         PublishedFrame frame = publishedFrame.get();
         if (frame == null) {
             return;
@@ -7677,6 +8127,13 @@ public final class AeroServerRuntime {
         return Math.max(0, tickCounter - lastCoordinatorSolveCompleteTick);
     }
 
+    private int ageTicks(int tick) {
+        if (tick == Integer.MIN_VALUE) {
+            return -1;
+        }
+        return Math.max(0, tickCounter - tick);
+    }
+
     private boolean isCoordinatorAlive() {
         SimulationCoordinator coordinator = simulationCoordinator;
         return coordinator != null && coordinator.running();
@@ -7751,6 +8208,10 @@ public final class AeroServerRuntime {
     }
 
     private void syncPublishedFlowToPlayers(MinecraftServer server, PublishedFrame frame) {
+        Set<UUID> observedPlayers = new HashSet<>();
+        Set<UUID> sentPlayers = new HashSet<>();
+        int sentPayloads = 0;
+        int flowAtlasIntervalTicks = flowAtlasResendIntervalTicks(server.getPlayerManager().getPlayerList().size());
         for (Map.Entry<WindowKey, BrickRuntimeAtlasSnapshot> entry : frame.regionAtlases().entrySet()) {
             WindowKey key = entry.getKey();
             ServerWorld world = server.getWorld(key.worldKey());
@@ -7762,22 +8223,85 @@ public final class AeroServerRuntime {
             if (recipients.isEmpty()) {
                 continue;
             }
-            AeroFlowPayload payload = AeroFlowPayload.fromPackedBytes(
-                world.getRegistryKey().getValue(),
-                atlas.origin(),
-                PARTICLE_FLOW_SAMPLE_STRIDE,
-                atlas.packed(),
-                atlas.packedFlowBytes()
-            );
+            AeroFlowPayload payload = null;
             for (ServerPlayerEntity player : recipients) {
+                UUID playerId = player.getUuid();
+                observedPlayers.add(playerId);
+                if (sentPlayers.contains(playerId)) {
+                    continue;
+                }
+                if (!shouldSendFlowAtlasToPlayer(player, key, atlas, frame, flowAtlasIntervalTicks)) {
+                    continue;
+                }
+                if (sentPayloads >= FLOW_ATLAS_MAX_PAYLOADS_PER_SYNC) {
+                    continue;
+                }
+                if (payload == null) {
+                    payload = AeroFlowPayload.fromPackedBytes(
+                        world.getRegistryKey().getValue(),
+                        atlas.origin(),
+                        PARTICLE_FLOW_SAMPLE_STRIDE,
+                        atlas.packed(),
+                        atlas.packedFlowBytes()
+                    );
+                }
                 ServerPlayNetworking.send(player, payload);
+                lastFlowAtlasSyncStates.put(
+                    playerId,
+                    new FlowAtlasSyncState(key.worldKey(), atlas.origin(), frame.frameId(), tickCounter)
+                );
+                sentPlayers.add(playerId);
+                sentPayloads++;
             }
         }
+        lastFlowAtlasSyncStates.keySet().retainAll(observedPlayers);
+    }
+
+    private boolean shouldSendFlowAtlasToPlayer(
+        ServerPlayerEntity player,
+        WindowKey key,
+        BrickRuntimeAtlasSnapshot atlas,
+        PublishedFrame frame,
+        int flowAtlasIntervalTicks
+    ) {
+        if (usesClientLocalL2(player)) {
+            return false;
+        }
+        if (isFastPlayerForL2(player)) {
+            return false;
+        }
+        FlowAtlasSyncState previous = lastFlowAtlasSyncStates.get(player.getUuid());
+        if (previous == null || !previous.sameAtlas(key, atlas)) {
+            return true;
+        }
+        int ticksSinceLastSend = tickCounter - previous.tick();
+        if (frame.frameId() <= previous.frameId()) {
+            return ticksSinceLastSend >= flowAtlasIntervalTicks;
+        }
+        return ticksSinceLastSend >= flowAtlasIntervalTicks;
+    }
+
+    private int flowAtlasResendIntervalTicks(int playerCount) {
+        int onlinePlayers = Math.max(1, playerCount);
+        int interval = FLOW_ATLAS_BASE_RESEND_INTERVAL_TICKS
+            + (onlinePlayers - 1) * FLOW_ATLAS_PLAYER_INTERVAL_INCREMENT_TICKS;
+        return MathHelper.clamp(
+            interval,
+            FLOW_ATLAS_BASE_RESEND_INTERVAL_TICKS,
+            FLOW_ATLAS_MAX_RESEND_INTERVAL_TICKS
+        );
+    }
+
+    private boolean isFastPlayerForL2(ServerPlayerEntity player) {
+        return player != null && AeroWindSamplingRules.isFastPlayerVelocity(player.getVelocity());
     }
 
     private List<ServerPlayerEntity> playersInsideFlowAtlas(ServerWorld world, BrickRuntimeAtlasSnapshot atlas) {
         List<ServerPlayerEntity> recipients = new ArrayList<>();
         for (ServerPlayerEntity player : world.getPlayers()) {
+            if (usesClientLocalL2(player)) {
+                continue;
+            }
             if (containsBlock(atlas.origin(), player.getBlockPos(), BRICK_RUNTIME_SIZE)) {
                 recipients.add(player);
             }
@@ -7791,8 +8315,12 @@ public final class AeroServerRuntime {
             observedPlayers.add(player.getUuid());
             CoarseWindSyncState state = coarseWindSyncStateForPlayer(player);
             CoarseWindSyncState previous = lastCoarseWindSyncStates.get(player.getUuid());
+            boolean staleAfterBackgroundRefresh = previous != null
+                && lastBackgroundRefreshAppliedTick != Integer.MIN_VALUE
+                && previous.tick() < lastBackgroundRefreshAppliedTick;
             if (previous != null
                 && previous.sameRegion(state)
+                && !staleAfterBackgroundRefresh
                 && tickCounter - previous.tick() < COARSE_WIND_RESEND_INTERVAL_TICKS) {
                 continue;
             }
@@ -7834,12 +8362,22 @@ public final class AeroServerRuntime {
                 * COARSE_WIND_SYNC_SIZE_Z
                 * NativeSimulationBridge.PACKED_ATLAS_CHANNELS
         ];
+        short[] packedAtmosphere = new short[
+            COARSE_WIND_SYNC_SIZE_X
+                * COARSE_WIND_SYNC_SIZE_Y
+                * COARSE_WIND_SYNC_SIZE_Z
+                * COARSE_ATMOSPHERE_CHANNELS
+        ];
         synchronized (simulationStateLock) {
+            if (!hasCoarseWindFieldLocked(world.getRegistryKey())) {
+                return null;
+            }
             for (int x = 0; x < COARSE_WIND_SYNC_SIZE_X; x++) {
                 for (int y = 0; y < COARSE_WIND_SYNC_SIZE_Y; y++) {
                     for (int z = 0; z < COARSE_WIND_SYNC_SIZE_Z; z++) {
                         int dstCell = ((x * COARSE_WIND_SYNC_SIZE_Y) + y) * COARSE_WIND_SYNC_SIZE_Z + z;
                         int dstBase = dstCell * NativeSimulationBridge.PACKED_ATLAS_CHANNELS;
+                        int atmosphereBase = dstCell * COARSE_ATMOSPHERE_CHANNELS;
                         BlockPos samplePos = BlockPos.ofFloored(
                             originX + (x + 0.5) * cellSize,
                             originY + (y + 0.5) * cellSize,
@@ -7850,6 +8388,25 @@ public final class AeroServerRuntime {
                         packed[dstBase + 1] = quantizeSignedToShort(sample.velocityY(), ATLAS_VELOCITY_QUANT_RANGE);
                         packed[dstBase + 2] = quantizeSignedToShort(sample.velocityZ(), ATLAS_VELOCITY_QUANT_RANGE);
                         packed[dstBase + 3] = quantizeSignedToShort(sample.pressure(), ATLAS_PRESSURE_QUANT_RANGE);
+                        packedAtmosphere[atmosphereBase] = quantizeSignedToShort(
+                            finiteOrDefault(sample.temperatureKelvin(), 288.15f) - 288.15f,
+                            COARSE_TEMPERATURE_ANOMALY_RANGE_K
+                        );
+                        packedAtmosphere[atmosphereBase + 1] = quantizeSignedToShort(
+                            MathHelper.clamp(finiteOrDefault(sample.humidity(), 0.0f), 0.0f, 1.0f) * 2.0f - 1.0f,
+                            1.0f
+                        );
+                        packedAtmosphere[atmosphereBase + 2] = quantizeSignedToShort(sample.turbulenceIntensity(), COARSE_TURBULENCE_RANGE_MPS);
+                        packedAtmosphere[atmosphereBase + 3] = quantizeSignedToShort(sample.gustX(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packedAtmosphere[atmosphereBase + 4] = quantizeSignedToShort(sample.gustY(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packedAtmosphere[atmosphereBase + 5] = quantizeSignedToShort(sample.gustZ(), ATLAS_VELOCITY_QUANT_RANGE);
+                        packedAtmosphere[atmosphereBase + 6] = quantizeSignedToShort(sample.windShearXPerBlock(), COARSE_SHEAR_RANGE_PER_BLOCK);
+                        packedAtmosphere[atmosphereBase + 7] = quantizeSignedToShort(sample.windShearZPerBlock(), COARSE_SHEAR_RANGE_PER_BLOCK);
+                        packedAtmosphere[atmosphereBase + 8] = quantizeSignedToShort(sample.ablStability(), 1.0f);
+                        packedAtmosphere[atmosphereBase + 9] = quantizeSignedToShort(
+                            MathHelper.clamp(sample.ablMixingStrength(), 0.0f, 1.0f) * 2.0f - 1.0f,
+                            1.0f
+                        );
                     }
                 }
             }
@@ -7862,8 +8419,14 @@ public final class AeroServerRuntime {
             COARSE_WIND_SYNC_SIZE_Y,
             COARSE_WIND_SYNC_SIZE_Z,
             tickCounter,
-            packed
+            packed,
+            packedAtmosphere
         );
+    }
+
+    private boolean hasCoarseWindFieldLocked(RegistryKey<World> worldKey) {
+        return worldKey != null
+            && (mesoscaleMetGrids.containsKey(worldKey) || backgroundMetGrids.containsKey(worldKey));
     }
 
     private int coarseWindOriginFor(int blockCoord, int size, int cellSize) {
@@ -8211,6 +8774,15 @@ public final class AeroServerRuntime {
     ) {
     }
 
+    private record WorldDeltaQueueKey(
+        int group,
+        int x,
+        int y,
+        int z,
+        int worldHash
+    ) {
+    }
+
     private record BrickRuntimeHint(
         int brickX,
         int brickY,
@@ -8231,6 +8803,27 @@ public final class AeroServerRuntime {
         int tickCounter,
         Map<RegistryKey<World>, BackgroundRefreshRequest> requests
     ) {
+    }
+
+    private record BackgroundRefreshWork(
+        int tickCounter,
+        RegistryKey<World> worldKey,
+        BackgroundRefreshRequest request,
+        WorldScaleDriver driver,
+        BackgroundMetGrid backgroundGrid,
+        MesoscaleGrid mesoscaleGrid,
+        ConcurrentLinkedQueue<MesoscaleGrid.NestedFeedbackBin> feedbackQueue
+    ) {
+    }
+
+    private record BackgroundRefreshTiming(
+        long diagnosticsNanos,
+        long driverNanos,
+        long l0Nanos,
+        long l1Nanos,
+        long feedbackNanos
+    ) {
+        private static final BackgroundRefreshTiming EMPTY = new BackgroundRefreshTiming(0L, 0L, 0L, 0L, 0L);
     }
 
     private record ThermalMaterial(
@@ -8333,8 +8926,10 @@ public final class AeroServerRuntime {
 
     private record NestedMetState(
         float windX,
+        float windY,
         float windZ,
-        float airTemperatureKelvin
+        float airTemperatureKelvin,
+        boolean verticalWindAvailable
     ) {
     }
 
@@ -8359,6 +8954,20 @@ public final class AeroServerRuntime {
                 && originX == other.originX()
                 && originY == other.originY()
                 && originZ == other.originZ();
+        }
+    }
+
+    private record FlowAtlasSyncState(
+        RegistryKey<World> worldKey,
+        BlockPos origin,
+        long frameId,
+        int tick
+    ) {
+        boolean sameAtlas(WindowKey key, BrickRuntimeAtlasSnapshot atlas) {
+            return key != null
+                && atlas != null
+                && worldKey.equals(key.worldKey())
+                && origin.equals(atlas.origin());
         }
     }
 
@@ -8630,16 +9239,27 @@ public final class AeroServerRuntime {
                         continue;
                     }
 
-                    flushPendingWorldDeltas();
-
                     int observedTick = tickCounter;
                     lastCoordinatorObservedTick = observedTick;
+                    if (pendingWorldDeltaCount > 0) {
+                        lastCoordinatorState = "worldDeltaFlush";
+                        flushPendingWorldDeltas(WORLD_DELTA_FLUSH_MAX_BATCHES_PER_CYCLE);
+                    } else {
+                        lastWorldDeltaFlushCount = 0;
+                    }
                     if (observedTick != lastSynchronizedTick) {
                         grantStepBudgetForObservedTicks();
                         synchronized (simulationStateLock) {
                             applyPendingActiveRegionBatchIfNeeded();
-                            applyPendingBackgroundRefreshIfNeeded();
-                            applyPendingResidentBrickStaticRefreshesIfNeeded();
+                        }
+                        applyPendingBackgroundRefreshIfNeeded();
+                        synchronized (simulationStateLock) {
+                            if (pendingResidentBrickStaticRefreshCount > 0) {
+                                lastCoordinatorState = "residentStaticRefresh";
+                                applyPendingResidentBrickStaticRefreshesIfNeeded(RESIDENT_BRICK_STATIC_REFRESH_BUDGET_PER_CYCLE);
+                            } else {
+                                lastResidentBrickStaticRefreshCount = 0;
+                            }
                             refreshDesiredWindowsFromBrickRuntime();
                         }
                         runMesoscaleStepCycle();

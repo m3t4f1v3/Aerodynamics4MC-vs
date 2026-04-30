@@ -1,9 +1,11 @@
 package com.aerodynamics4mc.api;
 
 public enum SamplePolicy {
+    CLIENT_LOCAL_PREFERRED(true, false, true),
     VISUAL_LOCAL_FIRST(true, true, true),
     GAMEPLAY_SERVER_ONLY(false, true, true),
     SERVER_AGGREGATED_PREFERRED(false, true, true),
+    SERVER_COARSE_ONLY(false, false, true),
     DIAGNOSTIC_ALL_SOURCES(true, true, true);
 
     private final boolean allowClientLocalL2;

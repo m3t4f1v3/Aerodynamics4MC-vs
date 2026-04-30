@@ -12,9 +12,20 @@ public record AeroWindSample(
     long l1Epoch,
     long worldDeltaEpoch,
     long l2Epoch,
-    float confidence
+    float confidence,
+    float temperatureKelvin,
+    float humidity,
+    float turbulenceIntensity,
+    float gustX,
+    float gustY,
+    float gustZ,
+    float windShearXPerBlock,
+    float windShearZPerBlock,
+    float ablStability,
+    float ablMixingStrength
 ) {
     public static final long UNKNOWN_EPOCH = -1L;
+    public static final float UNKNOWN_SCALAR = Float.NaN;
     public static final AeroWindSample ZERO = new AeroWindSample(
         0.0f,
         0.0f,
@@ -25,8 +36,54 @@ public record AeroWindSample(
         UNKNOWN_EPOCH,
         UNKNOWN_EPOCH,
         UNKNOWN_EPOCH,
+        0.0f,
+        UNKNOWN_SCALAR,
+        UNKNOWN_SCALAR,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
         0.0f
     );
+
+    public AeroWindSample(
+        float velocityX,
+        float velocityY,
+        float velocityZ,
+        float pressure,
+        Level level,
+        Authority authority,
+        long l1Epoch,
+        long worldDeltaEpoch,
+        long l2Epoch,
+        float confidence
+    ) {
+        this(
+            velocityX,
+            velocityY,
+            velocityZ,
+            pressure,
+            level,
+            authority,
+            l1Epoch,
+            worldDeltaEpoch,
+            l2Epoch,
+            confidence,
+            UNKNOWN_SCALAR,
+            UNKNOWN_SCALAR,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f
+        );
+    }
 
     public static AeroWindSample serverAuthoritative(
         float velocityX,
@@ -103,6 +160,97 @@ public record AeroWindSample(
         return new Vec3d(velocityX, velocityY, velocityZ);
     }
 
+    public Vec3d gustVelocity() {
+        return new Vec3d(gustX, gustY, gustZ);
+    }
+
+    public Vec3d velocityWithGust() {
+        return new Vec3d(velocityX + gustX, velocityY + gustY, velocityZ + gustZ);
+    }
+
+    public float windShearMagnitudePerBlock() {
+        return (float) Math.sqrt(windShearXPerBlock * windShearXPerBlock + windShearZPerBlock * windShearZPerBlock);
+    }
+
+    public boolean hasAtmosphericDiagnostics() {
+        return Float.isFinite(temperatureKelvin)
+            || Float.isFinite(humidity)
+            || turbulenceIntensity > 0.0f
+            || windShearMagnitudePerBlock() > 0.0f
+            || ablMixingStrength > 0.0f;
+    }
+
+    public AeroWindSample withAtmosphere(
+        float temperatureKelvin,
+        float humidity,
+        float turbulenceIntensity,
+        float gustX,
+        float gustY,
+        float gustZ,
+        float windShearXPerBlock,
+        float windShearZPerBlock,
+        float ablStability,
+        float ablMixingStrength
+    ) {
+        return new AeroWindSample(
+            velocityX,
+            velocityY,
+            velocityZ,
+            pressure,
+            level,
+            authority,
+            l1Epoch,
+            worldDeltaEpoch,
+            l2Epoch,
+            confidence,
+            temperatureKelvin,
+            humidity,
+            Math.max(0.0f, finiteOrZero(turbulenceIntensity)),
+            finiteOrZero(gustX),
+            finiteOrZero(gustY),
+            finiteOrZero(gustZ),
+            finiteOrZero(windShearXPerBlock),
+            finiteOrZero(windShearZPerBlock),
+            finiteOrZero(ablStability),
+            Math.max(0.0f, finiteOrZero(ablMixingStrength))
+        );
+    }
+
+    public AeroWindSample withVelocityAndPressure(
+        float velocityX,
+        float velocityY,
+        float velocityZ,
+        float pressure,
+        Level level,
+        Authority authority,
+        long l1Epoch,
+        long worldDeltaEpoch,
+        long l2Epoch
+    ) {
+        return new AeroWindSample(
+            velocityX,
+            velocityY,
+            velocityZ,
+            pressure,
+            level,
+            authority,
+            l1Epoch,
+            worldDeltaEpoch,
+            l2Epoch,
+            confidence,
+            temperatureKelvin,
+            humidity,
+            turbulenceIntensity,
+            gustX,
+            gustY,
+            gustZ,
+            windShearXPerBlock,
+            windShearZPerBlock,
+            ablStability,
+            ablMixingStrength
+        );
+    }
+
     public boolean hasFlow() {
         return level != Level.NONE && authority != Authority.NONE;
     }
@@ -122,6 +270,10 @@ public record AeroWindSample(
             return Source.L2_BRICK;
         }
         return Source.NONE;
+    }
+
+    private static float finiteOrZero(float value) {
+        return Float.isFinite(value) ? value : 0.0f;
     }
 
     public enum Level {

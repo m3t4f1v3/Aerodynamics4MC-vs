@@ -410,16 +410,12 @@ final class WorldScaleDriver {
 
         for (CycloneCell cell : cycloneCells) {
             CycloneContribution contribution = cell.sample(cellX, cellZ, activeStormActivity);
-            targetWindX += contribution.windX();
-            targetWindZ += contribution.windZ();
             pressureAnomalyPa += contribution.pressureAnomalyPa();
             temperatureBiasKelvin += contribution.temperatureBiasKelvin();
             humidity += contribution.humidityBias();
         }
         for (ConvectiveCluster cluster : convectiveClusters) {
             ConvectiveContribution contribution = cluster.sample(cellX, cellZ, activeStormActivity);
-            targetWindX += contribution.windX();
-            targetWindZ += contribution.windZ();
             pressureAnomalyPa += contribution.pressureAnomalyPa();
             temperatureBiasKelvin += contribution.temperatureBiasKelvin();
             humidity += contribution.humidityBias();
@@ -431,8 +427,6 @@ final class WorldScaleDriver {
         }
         for (TornadoVortex vortex : tornadoVortices) {
             TornadoContribution contribution = vortex.sample(cellX, cellZ);
-            targetWindX += contribution.windX();
-            targetWindZ += contribution.windZ();
             humidity += contribution.moistening();
             tornadoWindX += contribution.windX();
             tornadoWindZ += contribution.windZ();

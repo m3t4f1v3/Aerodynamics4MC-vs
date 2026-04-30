@@ -2,6 +2,7 @@ package com.aerodynamics4mc.client;
 
 import com.aerodynamics4mc.api.AeroWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
+import com.aerodynamics4mc.net.AeroClientL2PreferencePayload;
 import com.aerodynamics4mc.net.AeroCoarseWindPayload;
 import com.aerodynamics4mc.net.AeroFlowPayload;
 import com.aerodynamics4mc.net.AeroFlowAnalysisPayload;
@@ -35,7 +36,11 @@ public final class AeroClientMod implements ClientModInitializer {
     }
 
     public static AeroWindSample sampleFlow(ClientWorld world, Vec3d position) {
-        return sampleFlow(world, position, SamplePolicy.SERVER_AGGREGATED_PREFERRED);
+        AeroClientMod active = instance;
+        SamplePolicy policy = active != null && active.clientL2Solver.isExperimentalEnabled()
+            ? SamplePolicy.CLIENT_LOCAL_PREFERRED
+            : SamplePolicy.SERVER_AGGREGATED_PREFERRED;
+        return sampleFlow(world, position, policy);
     }
 
     public static AeroWindSample sampleFlow(ClientWorld world, Vec3d position, SamplePolicy policy) {
@@ -59,6 +64,7 @@ public final class AeroClientMod implements ClientModInitializer {
             ));
             irisWindBridge.onRuntimeState(payload.streamingEnabled());
             clientL2Solver.onRuntimeState(payload.streamingEnabled());
+            sendClientL2Preference(clientL2Solver.isExperimentalEnabled() && payload.streamingEnabled());
         });
     }
 
@@ -104,7 +110,21 @@ public final class AeroClientMod implements ClientModInitializer {
         boolean enabled
     ) {
         clientL2Solver.setExperimentalEnabled(enabled);
-        source.sendFeedback(Text.literal("Client L2 experimental " + (enabled ? "enabled" : "disabled")));
+        if (enabled) {
+            visualizer.clearRemoteFlowFields();
+        }
+        sendClientL2Preference(enabled);
+        source.sendFeedback(Text.literal("Client L2 local solve " + (enabled ? "enabled" : "disabled")));
         return 1;
+    }
+
+    private void sendClientL2Preference(boolean enabled) {
+        try {
+            if (ClientPlayNetworking.canSend(AeroClientL2PreferencePayload.ID)) {
+                ClientPlayNetworking.send(new AeroClientL2PreferencePayload(enabled));
+            }
+        } catch (IllegalStateException ignored) {
+            // The client may be between play-networking sessions while commands/state callbacks settle.
+        }
     }
 }

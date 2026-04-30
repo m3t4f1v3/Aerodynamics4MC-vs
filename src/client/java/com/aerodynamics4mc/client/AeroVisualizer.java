@@ -5,6 +5,7 @@ import java.util.Map;
 
 import org.joml.Matrix4f;
 
+import com.aerodynamics4mc.api.AeroWindSamplingRules;
 import com.aerodynamics4mc.api.AeroWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 import com.aerodynamics4mc.flow.AnalysisFlowCodec;
@@ -32,10 +33,15 @@ import net.minecraft.world.debug.gizmo.GizmoDrawing;
 final class AeroVisualizer {
     private static final float ATLAS_VELOCITY_RANGE = 5.6f;
     private static final float ATLAS_PRESSURE_RANGE = 0.03f;
+    private static final int COARSE_ATMOSPHERE_CHANNELS = 10;
+    private static final float COARSE_TEMPERATURE_ANOMALY_RANGE_K = 64.0f;
+    private static final float COARSE_TURBULENCE_RANGE_MPS = 3.0f;
+    private static final float COARSE_SHEAR_RANGE_PER_BLOCK = 0.08f;
     private static final double MAX_RENDER_DISTANCE = 192.0;
     private static final double REMOTE_VECTOR_RENDER_DISTANCE = 144.0;
     private static final double ANALYSIS_RENDER_DISTANCE = 192.0;
-    private static final int REGION_STALE_TICKS = 40;
+    private static final int REGION_STALE_TICKS = 120;
+    private static final int REGION_STALE_CLEANUP_INTERVAL_TICKS = 20;
     private static final int REMOTE_VECTOR_FIELD_STRIDE = 1;
     private static final int REMOTE_STREAMLINE_SEED_STRIDE = 1;
     private static final int REMOTE_STREAMLINE_FACE_BUCKETS = 1;
@@ -114,6 +120,10 @@ final class AeroVisualizer {
         localWindows.clear();
     }
 
+    void clearRemoteFlowFields() {
+        remoteWindows.clear();
+    }
+
     void onCoarseWindField(AeroCoarseWindPayload payload) {
         if (!streamingEnabled) {
             return;
@@ -161,16 +171,18 @@ final class AeroVisualizer {
         if (!streamingEnabled) {
             return AeroWindSample.ZERO;
         }
-        SamplePolicy effectivePolicy = policy == null ? SamplePolicy.SERVER_AGGREGATED_PREFERRED : policy;
+        SamplePolicy effectivePolicy = effectiveSamplePolicyForLocalPlayer(policy);
         RemoteFlowField l2Field = effectivePolicy.allowClientLocalL2()
             ? findNewestField(localWindows, dimensionId, position)
             : null;
         if (l2Field != null) {
             return l2Field.sampleFlowTrilinear(position);
         }
-        l2Field = findNewestRemoteField(dimensionId, position);
-        if (l2Field != null) {
-            return l2Field.sampleFlowTrilinear(position);
+        if (effectivePolicy.allowServerAggregatedL2()) {
+            l2Field = findNewestRemoteField(dimensionId, position);
+            if (l2Field != null) {
+                return l2Field.sampleFlowTrilinear(position);
+            }
         }
         if (!effectivePolicy.allowServerCoarse()) {
             return AeroWindSample.ZERO;
@@ -180,6 +192,18 @@ final class AeroVisualizer {
             return coarseField.sampleFlowTrilinear(position);
         }
         return AeroWindSample.ZERO;
+    }
+
+    private SamplePolicy effectiveSamplePolicyForLocalPlayer(SamplePolicy policy) {
+        SamplePolicy effectivePolicy = policy == null ? SamplePolicy.SERVER_AGGREGATED_PREFERRED : policy;
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (effectivePolicy != SamplePolicy.DIAGNOSTIC_ALL_SOURCES
+            && client != null
+            && client.player != null
+            && AeroWindSamplingRules.isFastPlayerVelocity(client.player.getVelocity())) {
+            return SamplePolicy.SERVER_COARSE_ONLY;
+        }
+        return effectivePolicy;
     }
 
     AeroWindSample sampleServerCoarseFlow(Identifier dimensionId, Vec3d position) {
@@ -231,6 +255,9 @@ final class AeroVisualizer {
     private void onClientTick() {
         clientTickCounter++;
         if (!streamingEnabled) {
+            return;
+        }
+        if (clientTickCounter % REGION_STALE_CLEANUP_INTERVAL_TICKS != 0L) {
             return;
         }
         remoteWindows.entrySet().removeIf(entry -> {
@@ -727,6 +754,22 @@ final class AeroVisualizer {
         return value / 32767.0f * ATLAS_PRESSURE_RANGE;
     }
 
+    private static float decodeTemperatureKelvin(short value) {
+        return 288.15f + value / 32767.0f * COARSE_TEMPERATURE_ANOMALY_RANGE_K;
+    }
+
+    private static float decodeUnit01(short value) {
+        return clamp01(value / 32767.0f * 0.5f + 0.5f);
+    }
+
+    private static float decodeTurbulence(short value) {
+        return Math.max(0.0f, value / 32767.0f * COARSE_TURBULENCE_RANGE_MPS);
+    }
+
+    private static float decodeShear(short value) {
+        return value / 32767.0f * COARSE_SHEAR_RANGE_PER_BLOCK;
+    }
+
     private static float clamp01(float value) {
         return Math.max(0.0f, Math.min(1.0f, value));
     }
@@ -918,6 +961,7 @@ final class AeroVisualizer {
         int sizeY,
         int sizeZ,
         short[] packedFlow,
+        short[] packedAtmosphere,
         long lastUpdatedTick
     ) {
         static CoarseWindField fromPayload(AeroCoarseWindPayload payload, long lastUpdatedTick) {
@@ -929,12 +973,13 @@ final class AeroVisualizer {
                 Math.max(1, payload.sizeY()),
                 Math.max(1, payload.sizeZ()),
                 payload.packedFlow(),
+                payload.packedAtmosphere(),
                 lastUpdatedTick
             );
         }
 
         AeroWindSample sampleFlowTrilinear(Vec3d position) {
-            return samplePackedFlow(
+            AeroWindSample flow = samplePackedFlow(
                 origin,
                 cellSize,
                 sizeX,
@@ -944,6 +989,30 @@ final class AeroVisualizer {
                 position,
                 AeroWindSample.Level.L1,
                 AeroWindSample.Authority.SERVER_AUTHORITATIVE
+            );
+            if (!flow.hasFlow() || packedAtmosphere == null || packedAtmosphere.length <= 0) {
+                return flow;
+            }
+            PackedAtmosphereSample atmosphere = samplePackedAtmosphere(
+                origin,
+                cellSize,
+                sizeX,
+                sizeY,
+                sizeZ,
+                packedAtmosphere,
+                position
+            );
+            return flow.withAtmosphere(
+                atmosphere.temperatureKelvin(),
+                atmosphere.humidity(),
+                atmosphere.turbulenceIntensity(),
+                atmosphere.gustX(),
+                atmosphere.gustY(),
+                atmosphere.gustZ(),
+                atmosphere.windShearXPerBlock(),
+                atmosphere.windShearZPerBlock(),
+                atmosphere.ablStability(),
+                atmosphere.ablMixingStrength()
             );
         }
 
@@ -1163,6 +1232,48 @@ final class AeroVisualizer {
 
     }
 
+    private record PackedAtmosphereSample(
+        float temperatureKelvin,
+        float humidity,
+        float turbulenceIntensity,
+        float gustX,
+        float gustY,
+        float gustZ,
+        float windShearXPerBlock,
+        float windShearZPerBlock,
+        float ablStability,
+        float ablMixingStrength
+    ) {
+        private static final PackedAtmosphereSample EMPTY = new PackedAtmosphereSample(
+            AeroWindSample.UNKNOWN_SCALAR,
+            AeroWindSample.UNKNOWN_SCALAR,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f
+        );
+
+        PackedAtmosphereSample lerp(PackedAtmosphereSample other, double t) {
+            float f = (float) t;
+            return new PackedAtmosphereSample(
+                temperatureKelvin + (other.temperatureKelvin - temperatureKelvin) * f,
+                humidity + (other.humidity - humidity) * f,
+                turbulenceIntensity + (other.turbulenceIntensity - turbulenceIntensity) * f,
+                gustX + (other.gustX - gustX) * f,
+                gustY + (other.gustY - gustY) * f,
+                gustZ + (other.gustZ - gustZ) * f,
+                windShearXPerBlock + (other.windShearXPerBlock - windShearXPerBlock) * f,
+                windShearZPerBlock + (other.windShearZPerBlock - windShearZPerBlock) * f,
+                ablStability + (other.ablStability - ablStability) * f,
+                ablMixingStrength + (other.ablMixingStrength - ablMixingStrength) * f
+            );
+        }
+    }
+
     private static AeroWindSample samplePackedFlow(
         BlockPos origin,
         int sampleStride,
@@ -1244,6 +1355,90 @@ final class AeroVisualizer {
             decodeVelocity(packedFlow[cell + 1]),
             decodeVelocity(packedFlow[cell + 2]),
             decodePressure(packedFlow[cell + 3])
+        );
+    }
+
+    private static PackedAtmosphereSample samplePackedAtmosphere(
+        BlockPos origin,
+        int sampleStride,
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedAtmosphere,
+        Vec3d position
+    ) {
+        double rx = (position.x - origin.getX()) / sampleStride;
+        double ry = (position.y - origin.getY()) / sampleStride;
+        double rz = (position.z - origin.getZ()) / sampleStride;
+        if (rx < 0.0 || ry < 0.0 || rz < 0.0
+            || rx >= sizeX || ry >= sizeY || rz >= sizeZ) {
+            return PackedAtmosphereSample.EMPTY;
+        }
+        double lx = MathHelper.clamp(rx - 0.5, 0.0, sizeX - 1.0);
+        double ly = MathHelper.clamp(ry - 0.5, 0.0, sizeY - 1.0);
+        double lz = MathHelper.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
+        return samplePackedAtmosphereAtSampleCoordinates(sizeX, sizeY, sizeZ, packedAtmosphere, lx, ly, lz);
+    }
+
+    private static PackedAtmosphereSample samplePackedAtmosphereAtSampleCoordinates(
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedAtmosphere,
+        double lx,
+        double ly,
+        double lz
+    ) {
+        int x0 = (int) Math.floor(lx);
+        int y0 = (int) Math.floor(ly);
+        int z0 = (int) Math.floor(lz);
+        int x1 = Math.min(sizeX - 1, x0 + 1);
+        int y1 = Math.min(sizeY - 1, y0 + 1);
+        int z1 = Math.min(sizeZ - 1, z0 + 1);
+        double fx = x1 == x0 ? 0.0 : lx - x0;
+        double fy = y1 == y0 ? 0.0 : ly - y0;
+        double fz = z1 == z0 ? 0.0 : lz - z0;
+        PackedAtmosphereSample c000 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x0, y0, z0);
+        PackedAtmosphereSample c100 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x1, y0, z0);
+        PackedAtmosphereSample c010 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x0, y1, z0);
+        PackedAtmosphereSample c110 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x1, y1, z0);
+        PackedAtmosphereSample c001 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x0, y0, z1);
+        PackedAtmosphereSample c101 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x1, y0, z1);
+        PackedAtmosphereSample c011 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x0, y1, z1);
+        PackedAtmosphereSample c111 = loadPackedAtmosphere(sizeX, sizeY, sizeZ, packedAtmosphere, x1, y1, z1);
+        PackedAtmosphereSample c00 = c000.lerp(c100, fx);
+        PackedAtmosphereSample c10 = c010.lerp(c110, fx);
+        PackedAtmosphereSample c01 = c001.lerp(c101, fx);
+        PackedAtmosphereSample c11 = c011.lerp(c111, fx);
+        PackedAtmosphereSample c0 = c00.lerp(c10, fy);
+        PackedAtmosphereSample c1 = c01.lerp(c11, fy);
+        return c0.lerp(c1, fz);
+    }
+
+    private static PackedAtmosphereSample loadPackedAtmosphere(
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        short[] packedAtmosphere,
+        int x,
+        int y,
+        int z
+    ) {
+        int cell = ((x * sizeY + y) * sizeZ + z) * COARSE_ATMOSPHERE_CHANNELS;
+        if (cell < 0 || cell + COARSE_ATMOSPHERE_CHANNELS - 1 >= packedAtmosphere.length) {
+            return PackedAtmosphereSample.EMPTY;
+        }
+        return new PackedAtmosphereSample(
+            decodeTemperatureKelvin(packedAtmosphere[cell]),
+            decodeUnit01(packedAtmosphere[cell + 1]),
+            decodeTurbulence(packedAtmosphere[cell + 2]),
+            decodeVelocity(packedAtmosphere[cell + 3]),
+            decodeVelocity(packedAtmosphere[cell + 4]),
+            decodeVelocity(packedAtmosphere[cell + 5]),
+            decodeShear(packedAtmosphere[cell + 6]),
+            decodeShear(packedAtmosphere[cell + 7]),
+            packedAtmosphere[cell + 8] / 32767.0f,
+            decodeUnit01(packedAtmosphere[cell + 9])
         );
     }
 
