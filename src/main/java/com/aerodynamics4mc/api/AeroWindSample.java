@@ -49,6 +49,26 @@ public record AeroWindSample(
         0.0f
     );
 
+    public AeroWindSample {
+        velocityX = finiteOrZero(velocityX);
+        velocityY = finiteOrZero(velocityY);
+        velocityZ = finiteOrZero(velocityZ);
+        pressure = finiteOrZero(pressure);
+        level = level == null ? Level.NONE : level;
+        authority = authority == null ? Authority.NONE : authority;
+        confidence = level == Level.NONE || authority == Authority.NONE ? 0.0f : clamp01(confidence);
+        temperatureKelvin = finiteOrUnknown(temperatureKelvin);
+        humidity = Float.isFinite(humidity) ? clamp01(humidity) : UNKNOWN_SCALAR;
+        turbulenceIntensity = nonNegativeFinite(turbulenceIntensity);
+        gustX = finiteOrZero(gustX);
+        gustY = finiteOrZero(gustY);
+        gustZ = finiteOrZero(gustZ);
+        windShearXPerBlock = finiteOrZero(windShearXPerBlock);
+        windShearZPerBlock = finiteOrZero(windShearZPerBlock);
+        ablStability = finiteOrZero(ablStability);
+        ablMixingStrength = nonNegativeFinite(ablMixingStrength);
+    }
+
     public AeroWindSample(
         float velocityX,
         float velocityY,
@@ -160,6 +180,10 @@ public record AeroWindSample(
         return new Vec3d(velocityX, velocityY, velocityZ);
     }
 
+    public Vec3d meanVelocity() {
+        return velocity();
+    }
+
     public Vec3d gustVelocity() {
         return new Vec3d(gustX, gustY, gustZ);
     }
@@ -168,15 +192,47 @@ public record AeroWindSample(
         return new Vec3d(velocityX + gustX, velocityY + gustY, velocityZ + gustZ);
     }
 
+    public Vec3d effectiveVelocity() {
+        return velocityWithGust();
+    }
+
+    public float speedMetersPerSecond() {
+        return (float) Math.sqrt(velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
+    }
+
+    public float horizontalSpeedMetersPerSecond() {
+        return (float) Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
+    }
+
     public float windShearMagnitudePerBlock() {
         return (float) Math.sqrt(windShearXPerBlock * windShearXPerBlock + windShearZPerBlock * windShearZPerBlock);
     }
 
+    public boolean hasTemperature() {
+        return Float.isFinite(temperatureKelvin);
+    }
+
+    public boolean hasHumidity() {
+        return Float.isFinite(humidity);
+    }
+
+    public boolean hasTurbulence() {
+        return turbulenceIntensity > 0.0f;
+    }
+
+    public boolean hasGust() {
+        return gustX != 0.0f || gustY != 0.0f || gustZ != 0.0f;
+    }
+
+    public boolean hasWindShear() {
+        return windShearMagnitudePerBlock() > 0.0f;
+    }
+
     public boolean hasAtmosphericDiagnostics() {
-        return Float.isFinite(temperatureKelvin)
-            || Float.isFinite(humidity)
-            || turbulenceIntensity > 0.0f
-            || windShearMagnitudePerBlock() > 0.0f
+        return hasTemperature()
+            || hasHumidity()
+            || hasTurbulence()
+            || hasWindShear()
             || ablMixingStrength > 0.0f;
     }
 
@@ -259,6 +315,81 @@ public record AeroWindSample(
         return authority == Authority.SERVER_AUTHORITATIVE || authority == Authority.SERVER_AGGREGATED;
     }
 
+    public boolean isTrustedForGameplay() {
+        return isServerTrusted();
+    }
+
+    public boolean isClientLocal() {
+        return authority == Authority.CLIENT_LOCAL;
+    }
+
+    public boolean isLocalVoxelFlow() {
+        return level == Level.L2;
+    }
+
+    public Level sourceLevel() {
+        return level;
+    }
+
+    public long freshnessEpoch() {
+        long latest = UNKNOWN_EPOCH;
+        if (l1Epoch > latest) {
+            latest = l1Epoch;
+        }
+        if (worldDeltaEpoch > latest) {
+            latest = worldDeltaEpoch;
+        }
+        if (l2Epoch > latest) {
+            latest = l2Epoch;
+        }
+        return latest;
+    }
+
+    public boolean hasFreshnessEpoch() {
+        return freshnessEpoch() != UNKNOWN_EPOCH;
+    }
+
+    public long ageTicks(long currentTick) {
+        long epoch = freshnessEpoch();
+        if (epoch == UNKNOWN_EPOCH || currentTick < epoch) {
+            return Long.MAX_VALUE;
+        }
+        return currentTick - epoch;
+    }
+
+    public boolean isFresh(long currentTick, long maxAgeTicks) {
+        if (maxAgeTicks < 0L) {
+            return false;
+        }
+        long age = ageTicks(currentTick);
+        return age != Long.MAX_VALUE && age <= maxAgeTicks;
+    }
+
+    public AeroWindSample withConfidence(float confidence) {
+        return new AeroWindSample(
+            velocityX,
+            velocityY,
+            velocityZ,
+            pressure,
+            level,
+            authority,
+            l1Epoch,
+            worldDeltaEpoch,
+            l2Epoch,
+            confidence,
+            temperatureKelvin,
+            humidity,
+            turbulenceIntensity,
+            gustX,
+            gustY,
+            gustZ,
+            windShearXPerBlock,
+            windShearZPerBlock,
+            ablStability,
+            ablMixingStrength
+        );
+    }
+
     public Source source() {
         if (level == Level.L0) {
             return Source.L0_BACKGROUND;
@@ -274,6 +405,18 @@ public record AeroWindSample(
 
     private static float finiteOrZero(float value) {
         return Float.isFinite(value) ? value : 0.0f;
+    }
+
+    private static float finiteOrUnknown(float value) {
+        return Float.isFinite(value) ? value : UNKNOWN_SCALAR;
+    }
+
+    private static float nonNegativeFinite(float value) {
+        return Math.max(0.0f, finiteOrZero(value));
+    }
+
+    private static float clamp01(float value) {
+        return Math.max(0.0f, Math.min(1.0f, finiteOrZero(value)));
     }
 
     public enum Level {
