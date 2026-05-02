@@ -138,6 +138,8 @@ final class ClientL2Solver {
     private long fastSuspendUntilGameTime = Long.MIN_VALUE;
     private long lastDiagnosticGameTime = Long.MIN_VALUE;
     private int lastStaticPatchCount;
+    private int lastFanPatchCellCount;
+    private int lastHeatPatchCellCount;
 
     ClientL2Solver(AeroVisualizer visualizer) {
         this.visualizer = visualizer;
@@ -190,10 +192,21 @@ final class ClientL2Solver {
         if (deltas.length == 0) {
             return;
         }
+        int fanPatchCells = 0;
+        int heatPatchCells = 0;
         for (NativeSimulationBridge.WorldDelta delta : deltas) {
+            int surfaceKind = (delta.data1() >> 8) & 0xFF;
+            if (isFanSurfaceKind(surfaceKind)) {
+                fanPatchCells++;
+            }
+            if (delta.value0() > 0.0f) {
+                heatPatchCells++;
+            }
             refreshLocalStaticCellIfActive(world, new BlockPos(delta.x(), delta.y(), delta.z()));
         }
         lastStaticPatchCount = deltas.length;
+        lastFanPatchCellCount = fanPatchCells;
+        lastHeatPatchCellCount = heatPatchCells;
         worker.submitWorldDeltas(worldKey, deltas);
     }
 
@@ -1087,6 +1100,11 @@ final class ClientL2Solver {
         };
     }
 
+    private boolean isFanSurfaceKind(int surfaceKind) {
+        return surfaceKind >= Byte.toUnsignedInt(SURFACE_KIND_FAN_X_NEG)
+            && surfaceKind <= Byte.toUnsignedInt(SURFACE_KIND_FAN_Z_POS);
+    }
+
     private float emitterPowerForCell(ClientWorld world, BlockPos pos, BlockState state) {
         float directPower = sampleEmitterThermalPowerWatts(state);
         if (directPower > 0.0f) {
@@ -1726,6 +1744,8 @@ final class ClientL2Solver {
             + " worker=" + worker.status()
             + " staticCache=" + staticBrickCache.size()
             + " staticPatches=" + lastStaticPatchCount
+            + " fanPatchCells=" + lastFanPatchCellCount
+            + " heatPatchCells=" + lastHeatPatchCellCount
             + " solveInterval=" + SOLVE_INTERVAL_TICKS
             + " publishInterval=" + LOCAL_PUBLISH_INTERVAL_TICKS
             + " prep=" + stagedPreparationStatus()

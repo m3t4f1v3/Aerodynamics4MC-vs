@@ -164,6 +164,7 @@ constexpr float kBoussinesqBeta = aero_lbm::thermal_core::runtime_boussinesq_bet
     kRuntimeSecondsPerStep,
     kRuntimeMetersPerCell
 );
+constexpr float kRuntimeBuoyancyGameplayGain = 16.0f;
 constexpr float kBoussinesqForceMax = 0.02f;
 
 constexpr float kCylinderBenchmarkLength = 2.2f;
@@ -918,6 +919,7 @@ inline float effective_thermal_cooling() {
 }
 
 inline float effective_boussinesq_beta() {
+    if (!benchmark_mode_active()) return kBoussinesqBeta * kRuntimeBuoyancyGameplayGain;
     if (!heated_cavity_benchmark_active()) return kBoussinesqBeta;
     const float ref_speed = benchmark_reference_speed();
     const float ref_length = std::max(1.0e-6f, finite_or(g_benchmark_cfg.reference_length, 1.0f));

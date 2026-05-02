@@ -12,8 +12,10 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 public final class AeroClientMod implements ClientModInitializer {
@@ -53,6 +55,14 @@ public final class AeroClientMod implements ClientModInitializer {
 
     public static Vec3d sampleWind(ClientWorld world, Vec3d position) {
         return sampleFlow(world, position).velocity();
+    }
+
+    public static void notifyBlockStateChanged(ClientWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+        AeroClientMod active = instance;
+        if (active == null) {
+            return;
+        }
+        active.clientL2Solver.onBlockStateChanged(world, pos, oldState, newState);
     }
 
     private void onRuntimeState(AeroRuntimeStatePayload payload, ClientPlayNetworking.Context context) {

@@ -5,6 +5,7 @@
   "client": [
     "AscendingParticleMixin",
     "CampfireSmokeParticleMixin",
+    "ClientWorldBlockStateMixin",
     "LeavesParticleMixin",
     "ParticleAccessor",
     "ParticleMixin"
