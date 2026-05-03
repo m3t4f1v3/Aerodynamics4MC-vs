@@ -4,25 +4,52 @@
 [![Native Matrix](https://github.com/MozillaFiredoge/Aerodynamics4MC-Fabric/workflows/native-matrix/badge.svg)](https://github.com/MozillaFiredoge/Aerodynamics4MC-Fabric/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Aerodynamics4MC is a Fabric mod that brings a multi-scale wind system to Minecraft. The current release direction is API-first: the server owns the coarse weather field, clients may run local L2 CFD for visualization and local effects, and other mods should consume wind through the public sampling API instead of reading internal solver buffers.
+> Aerodynamics4MC is a Fabric mod that brings a multi-scale **real-time wind / weather** system to
+> Minecraft. The server owns coarse weather, clients may run a local high-resolution CFD layer for
+> visualization, and other mods consume wind through the public API rather than reading internal
+> solver buffers.
+>
+> Aerodynamics4MC 是一个为 Minecraft 提供 **多尺度实时风场与天气** 的 Fabric mod。粗尺度天气由
+> 服务端权威产出，客户端可选地运行高分辨率 CFD 用于可视化，外部 mod 通过公共 API 读取风场。
 
-This README documents the current `fabric-mod/` project. Older root-level notes in the parent repository may describe obsolete architecture.
+---
 
-## Current Status
+## Read this first / 先读这里
 
-The mod currently has three wind layers:
+If you are going to **modify wind generation** (e.g., change how L0/L1 wind is produced, add a new
+storm type, retune cyclone strength, port to a different LBM), the entry point is:
 
-| Layer | Owner | Resolution | Role | Gameplay trust |
-|-------|-------|------------|------|----------------|
-| L0 | Server | 256 blocks/cell | World-scale pressure, geostrophic wind, terrain and roughness driver | Trusted |
-| L1 | Server | 64x64x40 blocks/cell, 8 layers | Mesoscale terrain-following wind, ABL shear, terrain bounce-back, turbulence/gust diagnostics | Trusted |
-| L2 | Client-local, optional | 32x32x32 cells per brick | Local voxel LBM around the player, visual vectors/streamlines, particles and building-scale feedback | Not server-trusted by default |
+如果你要 **修改风场产生逻辑**（例如改 L0/L1 的风产生方式、加新风暴类型、重调气旋强度、换一个 LBM 模型），
+请先读：
 
-The server authoritative path is L0/L1. Client L2 is an experimental fine layer that uses server coarse wind as initial/boundary reference, but it is not a trusted source for server-side game balance unless a future validation/aggregation path is explicitly added.
+> 📘 **[`../docs/wind-system-overview.md`](../docs/wind-system-overview.md)** — single authoritative
+> overview of the wind system: layers, principles, formulas, file:line citations, tunable
+> constants, and a maintainer cheat-sheet. Bilingual.
 
-Legacy server L2, capture, analysis, and patch inspection code still exists for diagnostics and research. Do not treat those paths as the primary release architecture.
+That document is the single source of truth for the wind-system architecture. The rest of this README
+covers project setup, public API contracts, and gameplay components.
 
-## Requirements
+该文档是风系统架构的唯一权威来源。本 README 余下部分覆盖：项目构建、公共 API、游戏内组件。
+
+---
+
+## Status / 当前状态
+
+The mod has a **driver + three nested grids**:
+
+| Layer | Java class | Resolution | Role | Gameplay trust |
+|-------|-----------|------------|------|----------------|
+| Driver | `runtime.WorldScaleDriver` | 384×384 pressure cells (256 b/cell) | Cyclones, convective clusters, tornadoes, planetary waves | Server-authoritative |
+| **L0** | `runtime.BackgroundMetGrid` | 41×41 cells × 256 b/cell | World-scale pressure, geostrophic wind, terrain & roughness | Server-authoritative |
+| **L1** | `runtime.MesoscaleGrid` | 33×33×8 cells (64×64×40 b/cell) | Terrain-following wind, ABL shear, gust/turbulence diagnostics, builds L2 forcing | Server-authoritative |
+| **L2** | `runtime.NativeSimulationBridge` (server, **disabled**) / `client.ClientL2Solver` (default) | Server: 64³ window · Client: 32³ bricks | D3Q27 cumulant LBM + SGS + Boussinesq | **Client-local by default** |
+
+`SERVER_AUTHORITATIVE_L2_ENABLED = false` (`AeroServerRuntime.java:123`). Server L2, capture, and
+inspect-patch paths still exist for diagnostics — **do not** treat them as the release architecture.
+
+---
+
+## Requirements / 环境要求
 
 | Component | Version |
 |-----------|---------|
@@ -40,35 +67,29 @@ Supported native targets:
 | Linux x86_64 / ARM64 | `libaero_lbm.so` |
 | macOS ARM64 | `libaero_lbm.dylib` |
 
-OpenCL is optional at runtime but required for the GPU backend. CPU fallback exists for compatibility and diagnostics.
+OpenCL is optional at runtime (GPU backend); a CPU fallback exists. Force CPU with `AERO_LBM_CPU_ONLY=1`.
 
-## Build And Run
+---
+
+## Build And Run / 构建与运行
 
 From `fabric-mod/`:
 
 ```bash
+# Run development client
 ./gradlew runClient
-```
 
-Compile Java and prepare bundled native resources:
-
-```bash
+# Compile + bundle native resources
 ./gradlew compileJava compileClientJava prepareNativeResources
-```
 
-Build a development jar:
-
-```bash
+# Development jar
 ./gradlew build
-```
 
-Build a remapped mod jar:
-
-```bash
+# Distributable (remapped) jar
 ./gradlew remapJar
 ```
 
-Build the native library manually:
+Native library (manual build):
 
 ```bash
 cd native
@@ -76,68 +97,72 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
-Native build details are in [native/README.md](native/README.md).
+Multi-platform superbuild and full native details: [`native/README.md`](native/README.md).
 
-## Runtime Architecture
+---
+
+## Maintainer entry points / 维护者入口
+
+Pick the row matching what you want to change. Every row links into the wind-system overview, where
+the actual file paths and constants live.
+
+| I want to change … / 我想改… | Start here |
+|---|---|
+| How storms / cyclones / tornadoes spawn and evolve | [overview §2 — WorldScaleDriver](../docs/wind-system-overview.md#2-worldscaledriver--planetary-scale-weather--行星尺度天气) |
+| L0 background wind law (geostrophic, terrain drag, roughness) | [overview §3 — BackgroundMetGrid](../docs/wind-system-overview.md#3-l0--backgroundmetgrid--背景天气网格) |
+| L1 layered ABL / wind shear / native L2 forcing | [overview §4 — MesoscaleGrid](../docs/wind-system-overview.md#4-l1--mesoscalegrid--中尺度网格) |
+| Native LBM kernel, channel layout, server-vs-client L2 | [overview §5 — Native LBM](../docs/wind-system-overview.md#5-l2--native-lbm--原生格子玻尔兹曼) |
+| Public sampling API consumed by other mods | [overview §6](../docs/wind-system-overview.md#6-public-wind-api--风采样公共-api), [`docs/wind-sampling-api.md`](../docs/wind-sampling-api.md) |
+| Tick cadence, refresh intervals, top-level constants | [overview §1.2](../docs/wind-system-overview.md#12-per-tick-orchestration--每-tick-编排) |
+| Quick "10 most load-bearing constants" reference | [overview §8.2](../docs/wind-system-overview.md#82-the-10-load-bearing-constants--十大先动这里常量) |
+
+---
+
+## Runtime architecture (sketch) / 运行架构示意
 
 ```text
-Minecraft server
-  AeroServerRuntime
-    L0 BackgroundMetGrid
-      pressure driver
-      geostrophic wind
-      terrain and roughness
-    L1 MesoscaleGrid
-      terrain-following vertical layers
-      ABL shear and Ekman turning
-      terrain solid mask / bounce-back
-      turbulence, gust, wind-shear diagnostics
-    Coarse wind sync payload
-      compact server-trusted L1/L0 field for clients
-
-Minecraft client
-  AeroClientMod
-    receives server coarse wind payload
-    exposes client-side AeroClientWindApi
-    renders vectors and streamlines
-  ClientL2Solver
-    optional experimental 32^3 brick LBM
-    seeded and bounded by server coarse wind
-    used for local visualization and particle effects
-
-Native library
-  JNI bridge used by the mod runtime
-  C ABI wind-tunnel API for external validation tools
-  OpenCL/CPU LBM backends
+WorldScaleDriver (cyclones, convection, tornadoes, planetary waves)
+        │
+        ▼
+L0 BackgroundMetGrid  41×41 / 256 b/cell
+   semi-Lagrangian advect → diffuse → geostrophic adjust
+   → terrain form-drag → roughness drag
+        │
+        ▼
+L1 MesoscaleGrid  33×33×8  (64×64×40 b/cell)
+   ABL shear, Ekman turn, terrain bounce-back, gusts, turbulence
+   → builds 25-channel forcing for native L2
+        │
+        ▼
+L2 Native LBM  64³ (server, disabled) / 32³ bricks (client)
+   D3Q27 cumulant + SGS + Boussinesq
+        │
+        ▼  AeroCoarseWindPayload (32-block-cell L1 broadcast)
+client AeroClientWindApi · ClientL2Solver · particle / Iris bridge
 ```
 
-Important scale constants in the current code:
+For the full diagram, formulas, and per-step math, see
+[`../docs/wind-system-overview.md`](../docs/wind-system-overview.md).
 
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `BACKGROUND_MET_CELL_SIZE_BLOCKS` | 256 | L0 horizontal cell size |
-| `MESOSCALE_MET_CELL_SIZE_BLOCKS` | 64 | L1 horizontal cell size |
-| `MESOSCALE_MET_LAYER_HEIGHT_BLOCKS` | 40 | L1 vertical layer thickness |
-| `MESOSCALE_MET_MAX_LAYERS` | 8 | L1 vertical layer count |
-| `COARSE_WIND_SYNC_CELL_SIZE_BLOCKS` | 32 | Server-to-client coarse wind payload cell size |
-| `ClientL2Solver.BRICK_SIZE` | 32 | Client local L2 brick size |
+---
 
-## Gameplay Components
+## Gameplay components / 游戏内组件
 
-The current gameplay-facing components are intentionally thin. Most systems should consume wind through the API rather than hardcoding block or solver internals.
+The gameplay surface is intentionally thin. Most behavior should consume wind via the API.
 
 | Component | Role |
 |-----------|------|
-| Fan block | Adds local forcing for ducts, ventilation tests, and visual flow feedback |
+| Fan block | Adds local momentum forcing for ducts / ventilation tests |
 | Duct block | Helps shape local airflow paths |
 | Wind Meter item | Right-click instrument that samples server-trusted L1/L0 wind at the player |
-| Terrain and blocks | Feed world-delta/static masks into the wind system |
-| Particles and Iris bridge | Should sample wind through the public API path |
-| External vehicle/machine mods | Should sample server-trusted L0/L1 unless they explicitly need local visual L2 |
+| Terrain & blocks | Feed world-delta and static masks into L1's L2 forcing payload |
+| Particles & Iris bridge | Should sample wind through the public API path |
 
-## Wind Sampling API
+---
 
-Other mods should use the public API under `com.aerodynamics4mc.api`.
+## Wind sampling API / 风采样 API
+
+Other mods consume wind through `com.aerodynamics4mc.api`.
 
 Server side:
 
@@ -162,39 +187,13 @@ Client side:
 import com.aerodynamics4mc.api.AeroClientWindApi;
 import com.aerodynamics4mc.api.AeroWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
-import net.minecraft.util.math.Vec3d;
 
 AeroWindSample sample = AeroClientWindApi.sample(
-    clientWorld,
-    position,
-    SamplePolicy.CLIENT_LOCAL_PREFERRED
-);
-
+    clientWorld, position, SamplePolicy.CLIENT_LOCAL_PREFERRED);
 Vec3d visualDrift = sample.effectiveVelocity();
 ```
 
-`AeroWindSample` contains:
-
-| Field or method | Meaning |
-|-----------------|---------|
-| `velocityX/Y/Z` | Mean wind velocity in m/s |
-| `pressure` | Pressure anomaly or local solver pressure proxy |
-| `level()` | Source scale: `NONE`, `L0`, `L1`, or `L2` |
-| `authority()` | Source authority: server authoritative, server aggregated, client local, remote, or none |
-| `confidence()` | Normalized confidence from 0 to 1 |
-| `temperatureKelvin`, `humidity` | Atmospheric diagnostics when available |
-| `turbulenceIntensity` | Local turbulence/gust proxy |
-| `gustX/Y/Z` | Gust velocity contribution |
-| `windShearXPerBlock`, `windShearZPerBlock` | Horizontal wind-shear gradient |
-| `ablStability`, `ablMixingStrength` | ABL diagnostics |
-| `meanVelocity()` | Mean velocity as `Vec3d` |
-| `effectiveVelocity()` | Mean velocity plus gust |
-| `isTrustedForGameplay()` | True when the sample can be used by server-authoritative gameplay |
-| `isClientLocal()` | True when the sample came from local client L2 |
-| `isLocalVoxelFlow()` | True for local L2 voxel-scale flow |
-| `ageTicks(...)`, `isFresh(...)` | Freshness helpers |
-
-### Sample Policies
+`SamplePolicy` selection guide:
 
 | Policy | Recommended use |
 |--------|-----------------|
@@ -213,39 +212,39 @@ if (!sample.isTrustedForGameplay()) {
 }
 ```
 
-Do not use client-local L2 for server-side balance, aircraft physics, or machine output unless the result is independently validated.
+Do not use client-local L2 for server-side balance, aircraft physics, or machine output unless the
+result is independently validated. Full contract: [`../docs/wind-sampling-api.md`](../docs/wind-sampling-api.md).
 
-Full API notes are in [../docs/wind-sampling-api.md](../docs/wind-sampling-api.md).
+### Recommended integration patterns / 推荐集成模式
 
-## Recommended Integration Patterns
-
-For aircraft, airships, turbines, and outdoor machines:
+For aircraft, airships, turbines, outdoor machines:
 
 ```java
-AeroWindSample sample = AeroWindApi.sample(player, pos, SamplePolicy.SERVER_COARSE_ONLY);
-Vec3d wind = sample.meanVelocity();
-float turbulence = sample.turbulenceIntensity();
+AeroWindSample s = AeroWindApi.sample(player, pos, SamplePolicy.SERVER_COARSE_ONLY);
+Vec3d wind = s.meanVelocity();
+float turbulence = s.turbulenceIntensity();
 ```
 
-For client-only particles such as smoke, steam, ash, or dust:
+For client-only particles (smoke / steam / ash / dust):
 
 ```java
-AeroWindSample sample = AeroClientWindApi.sample(world, pos, SamplePolicy.CLIENT_LOCAL_PREFERRED);
-Vec3d drift = sample.effectiveVelocity();
+AeroWindSample s = AeroClientWindApi.sample(world, pos, SamplePolicy.CLIENT_LOCAL_PREFERRED);
+Vec3d drift = s.effectiveVelocity();
 ```
 
 For engineering overlays:
 
 ```java
-AeroWindSample sample = AeroClientWindApi.sample(world, pos, SamplePolicy.VISUAL_LOCAL_FIRST);
-if (sample.level() == AeroWindSample.Level.L2) {
-    // Show local voxel flow.
-}
+AeroWindSample s = AeroClientWindApi.sample(world, pos, SamplePolicy.VISUAL_LOCAL_FIRST);
+if (s.level() == AeroWindSample.Level.L2) { /* show local voxel flow */ }
 ```
 
-Consumers should not depend on packet formats, internal grid classes, native handles, atlas layouts, or visualizer buffers.
+Consumers must not depend on packet formats, internal grid classes, native handles, atlas layouts, or
+visualizer buffers.
 
-## Commands
+---
+
+## Commands / 指令
 
 Server commands require permission level 2+:
 
@@ -253,78 +252,107 @@ Server commands require permission level 2+:
 |---------|---------|
 | `/aero start` | Start server wind runtime and coarse sync |
 | `/aero stop` | Stop runtime and clear active state |
-| `/aero status` | Print server runtime, L0/L1, coordinator, and native status |
+| `/aero status` | Print server runtime, L0/L1, coordinator, native status |
 | `/aero render` | Print current client render mode status |
-| `/aero render vectors on/off` | Toggle velocity vector rendering |
+| `/aero render vectors on/off` | Toggle velocity-vector rendering |
 | `/aero render streamlines on/off` | Toggle streamline rendering |
 | `/aero dumpdata` | Dump runtime diagnostics |
 | `/aero dump_l1` | Dump L1 mesoscale snapshot |
 | `/aero nested_feedback` | Print legacy nested-feedback diagnostics |
-| `/aero capture_l2 ...` | Deprecated diagnostic capture path |
-| `/aero inspect_patch ...` | Deprecated inspection/analysis path |
+| `/aero capture_l2 …` | Deprecated diagnostic capture path |
+| `/aero inspect_patch …` | Deprecated inspection / analysis path |
 
 Client commands:
 
 | Command | Purpose |
 |---------|---------|
 | `/aero_client_l2` | Print client L2 status |
-| `/aero_client_l2 status` | Print client L2 status |
-| `/aero_client_l2 on` | Enable experimental client-local L2 |
-| `/aero_client_l2 off` | Disable experimental client-local L2 |
+| `/aero_client_l2 on` / `off` | Enable / disable experimental client-local L2 |
 
-Client L2 is currently default-off in code. If enabled, it is intended for local visualization/effects and should not be interpreted as server-authoritative gameplay state.
+Client L2 is currently default-off in code. When enabled, it is for local visualization/effects and
+must not be treated as server-authoritative gameplay state.
 
-## Visualization
+---
 
-The current visualizer favors a CFD-style viridis line renderer:
+## Visualization / 可视化
 
 | Mode | Description |
 |------|-------------|
-| Vectors | One line segment per sampled cell; direction is velocity direction, length and color encode speed |
-| Streamlines | Seeded integration through the sampled field, also colored by speed |
+| Vectors | One line segment per sampled cell; direction = velocity, length & color encode speed |
+| Streamlines | Seeded integration through the sampled field, colored by speed |
 
-The old glyph path is no longer the preferred presentation layer.
+The CFD-style viridis line renderer is the preferred presentation; the old glyph path is legacy.
 
-## Native Solver API
+---
 
-The native library also exposes a small C ABI for standalone wind-tunnel validation and collaboration tools. It is independent of Minecraft, Fabric, and Create: Aeronautics internals.
+## Native solver C ABI / 原生求解器 C ABI
 
-Relevant docs:
+The native library also exposes a small C ABI for standalone wind-tunnel validation, independent of
+Minecraft / Fabric / Create:Aeronautics internals.
 
 | Document | Purpose |
 |----------|---------|
-| [native/docs/wind_tunnel_solver_api.md](native/docs/wind_tunnel_solver_api.md) | C ABI for rectangular wind-tunnel cases |
-| [native/docs/jni_dll_usage_zh.md](native/docs/jni_dll_usage_zh.md) | Chinese Java/JNA/JNI DLL usage notes |
-| [native/tools/benchmark_solver_dll.py](native/tools/benchmark_solver_dll.py) | Python smoke benchmark for DLL/shared-library output |
+| [`native/docs/wind_tunnel_solver_api.md`](native/docs/wind_tunnel_solver_api.md) | C ABI for rectangular wind-tunnel cases |
+| [`native/docs/jni_dll_usage_zh.md`](native/docs/jni_dll_usage_zh.md) | JNA/JNI DLL usage notes (中文) |
+| [`native/tools/benchmark_solver_dll.py`](native/tools/benchmark_solver_dll.py) | Python smoke benchmark |
 
-The C ABI is a low-Mach static wind-tunnel interface. It accepts grid size, voxel solid mask, boundary settings, and optional previous macro state, then outputs velocity and pressure-proxy fields.
+The C ABI is a low-Mach static wind-tunnel interface: input grid size, voxel solid mask, BC settings,
+optional previous macro state; output velocity and pressure-proxy fields.
 
-## Known Boundaries
+---
 
-Current release assumptions:
+## Known boundaries / 已知边界
 
 | Area | Current position |
 |------|------------------|
 | Near-sonic aircraft | Not supported by the in-game world solver |
-| Dynamic propeller geometry | Not implemented in the public wind-tunnel API |
+| Dynamic propeller geometry | Not in the public wind-tunnel API |
 | Server-trusted local L2 | Not the default path |
 | Multiplayer L2 feedback | Requires future validation/aggregation design |
 | Analysis/capture paths | Deprecated diagnostics, not release architecture |
 | Voxel-to-airfoil design workflow | Out of scope for the in-game runtime API |
 
-For Create: Aeronautics style integration, use `SERVER_COARSE_ONLY` for world wind and a separate vehicle-relative offline/proxy aerodynamic model for wing/propeller coefficients.
+For Create:Aeronautics-style integration, use `SERVER_COARSE_ONLY` for world wind plus a separate
+vehicle-relative offline / proxy aerodynamic model for wing/propeller coefficients.
 
-## Documentation
+---
 
-Additional project notes:
+## Documentation map / 文档地图
+
+**Wind system (start at the top):**
 
 | Document | Purpose |
 |----------|---------|
-| [../docs/wind-sampling-api.md](../docs/wind-sampling-api.md) | Stable sampling API contract |
-| [../docs/player-facing-wind-design.md](../docs/player-facing-wind-design.md) | Player-facing wind design direction |
-| [native/README.md](native/README.md) | Native build details |
-| [native/docs/wind_tunnel_solver_api.md](native/docs/wind_tunnel_solver_api.md) | Standalone C ABI |
+| 📘 [`../docs/wind-system-overview.md`](../docs/wind-system-overview.md) | **Authoritative wind-system overview** — read this first |
+| [`../docs/wind-sampling-api.md`](../docs/wind-sampling-api.md) | Public sampling API contract (current) |
+| [`../docs/world-scale-weather-design.md`](../docs/world-scale-weather-design.md) | Driver phenomenology / intent (older naming) |
+| [`../docs/wind-shear-weather-roadmap.md`](../docs/wind-shear-weather-roadmap.md) | ABL / wind-shear roadmap |
+| [`../docs/player-facing-wind-design.md`](../docs/player-facing-wind-design.md) | Product philosophy |
 
-## License
+**Native solver:**
+
+| Document | Purpose |
+|----------|---------|
+| [`native/README.md`](native/README.md) | Native build details |
+| [`../docs/native-jni-interface-reference.md`](../docs/native-jni-interface-reference.md) | JNI / channel-layout reference |
+| [`../docs/native-physics-engine-todo.md`](../docs/native-physics-engine-todo.md) | Open work in the native solver |
+| [`../docs/native-authoritative-l2-runtime-design.md`](../docs/native-authoritative-l2-runtime-design.md) | Server-authoritative L2 design (*partially stale* — see overview §7) |
+| [`native/docs/wind_tunnel_solver_api.md`](native/docs/wind_tunnel_solver_api.md) | Standalone C ABI |
+
+**Integration & legacy:**
+
+| Document | Purpose |
+|----------|---------|
+| [`../docs/shaderpack-wind-compat-design.md`](../docs/shaderpack-wind-compat-design.md) | Iris / BSL bridge design |
+| [`../docs/on-demand-l2-prefetch-design.md`](../docs/on-demand-l2-prefetch-design.md) | Brick-prefetch design (*aspirational*) |
+| [`../docs/local-air-patch-design.md`](../docs/local-air-patch-design.md) | Legacy patch concept (*deprecated*) |
+| [`../docs/phase2-completion-log.md`](../docs/phase2-completion-log.md), [`../docs/phase3-completion-log.md`](../docs/phase3-completion-log.md), [`../docs/phase3-implementation-plan.md`](../docs/phase3-implementation-plan.md) | Historical milestones |
+
+Repo-root [`../CLAUDE.md`](../CLAUDE.md) carries a high-level project summary used by tooling — its
+constants table should stay aligned with the wind-system overview.
+
+---
+
+## License / 许可证
 
 MIT. See repository license files for details.
