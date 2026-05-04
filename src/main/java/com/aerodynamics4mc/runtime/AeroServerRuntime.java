@@ -31,6 +31,7 @@ import com.aerodynamics4mc.FanBlock;
 import com.aerodynamics4mc.ModBlocks;
 import com.aerodynamics4mc.api.AeroWindSamplingRules;
 import com.aerodynamics4mc.api.AeroWindSample;
+import com.aerodynamics4mc.api.GameplayWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 import com.aerodynamics4mc.flow.AnalysisFlowCodec;
 import com.aerodynamics4mc.net.AeroClientL2PreferencePayload;
@@ -338,7 +339,7 @@ public final class AeroServerRuntime {
     private volatile L2CaptureSession activeL2CaptureSession;
     private volatile InspectionSolveSession activeInspectionSolveSession;
 
-    private volatile boolean streamingEnabled = false;
+    private volatile boolean streamingEnabled = true;
     private volatile boolean renderVelocityVectorsEnabled = true;
     private volatile boolean renderStreamlinesEnabled = true;
     private volatile int tickCounter = 0;
@@ -417,6 +418,7 @@ public final class AeroServerRuntime {
         ServerPlayNetworking.registerGlobalReceiver(AeroClientL2PreferencePayload.ID, (payload, context) ->
             context.server().execute(() -> INSTANCE.setClientLocalL2Preference(context.player(), payload.localL2Enabled()))
         );
+        ServerLifecycleEvents.SERVER_STARTED.register(INSTANCE::enableStreamingOnServerStart);
         ServerLifecycleEvents.SERVER_STOPPED.register(INSTANCE::shutdownAll);
         CommandRegistrationCallback.EVENT.register(INSTANCE::registerCommands);
     }
@@ -498,6 +500,32 @@ public final class AeroServerRuntime {
         );
     }
 
+    public static GameplayWindSample sampleGameplay(ServerWorld world, Vec3d position) {
+        return sampleGameplay(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerWorld world, Vec3d position, SamplePolicy policy) {
+        if (world == null || position == null) {
+            return GameplayWindSample.ZERO;
+        }
+        return INSTANCE.sampleGameplayWind(world.getRegistryKey(), BlockPos.ofFloored(position), policy);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, Vec3d position) {
+        return sampleGameplay(player, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, Vec3d position, SamplePolicy policy) {
+        if (player == null || position == null) {
+            return GameplayWindSample.ZERO;
+        }
+        return INSTANCE.sampleGameplayWind(
+            player.getEntityWorld().getRegistryKey(),
+            BlockPos.ofFloored(position),
+            effectiveSamplePolicyForPlayer(player, policy)
+        );
+    }
+
     public static AeroWindSample sampleWind(ServerWorld world, BlockPos position) {
         return sampleFlow(world, position);
     }
@@ -528,6 +556,32 @@ public final class AeroServerRuntime {
         );
     }
 
+    public static GameplayWindSample sampleGameplay(ServerWorld world, BlockPos position) {
+        return sampleGameplay(world, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerWorld world, BlockPos position, SamplePolicy policy) {
+        if (world == null || position == null) {
+            return GameplayWindSample.ZERO;
+        }
+        return INSTANCE.sampleGameplayWind(world.getRegistryKey(), position, policy);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, BlockPos position) {
+        return sampleGameplay(player, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, BlockPos position, SamplePolicy policy) {
+        if (player == null || position == null) {
+            return GameplayWindSample.ZERO;
+        }
+        return INSTANCE.sampleGameplayWind(
+            player.getEntityWorld().getRegistryKey(),
+            position,
+            effectiveSamplePolicyForPlayer(player, policy)
+        );
+    }
+
     private static SamplePolicy effectiveSamplePolicyForPlayer(ServerPlayerEntity player, SamplePolicy policy) {
         SamplePolicy effectivePolicy = policy == null ? SamplePolicy.SERVER_COARSE_ONLY : policy;
         if (effectivePolicy != SamplePolicy.DIAGNOSTIC_ALL_SOURCES
@@ -540,6 +594,17 @@ public final class AeroServerRuntime {
     private AeroWindSample sampleWind(RegistryKey<World> worldKey, BlockPos position, SamplePolicy policy) {
         synchronized (simulationStateLock) {
             return sampleWindLocked(worldKey, position, policy);
+        }
+    }
+
+    private GameplayWindSample sampleGameplayWind(RegistryKey<World> worldKey, BlockPos position, SamplePolicy policy) {
+        synchronized (simulationStateLock) {
+            SamplePolicy effectivePolicy = policy == null ? SamplePolicy.GAMEPLAY_SERVER_ONLY : policy;
+            AeroWindSample raw = sampleWindLocked(worldKey, position, effectivePolicy);
+            AeroWindSample coarse = raw.sourceLevel() == AeroWindSample.Level.L2
+                ? sampleCoarseWindLocked(worldKey, position)
+                : raw;
+            return GameplayWindSample.from(raw, coarse);
         }
     }
 
@@ -889,20 +954,6 @@ public final class AeroServerRuntime {
     ) {
         dispatcher.register(CommandManager.literal("aero")
             .requires(CommandManager.requirePermissionLevel(CommandManager.ADMINS_CHECK))
-            .then(CommandManager.literal("start")
-                .executes(ctx -> {
-                    resetMainThreadProfiling();
-                    lastSyncedFlowFrameId = 0L;
-                    lastCoarseWindSyncStates.clear();
-                    lastFlowAtlasSyncStates.clear();
-                    zeroAtlasHoldUntilTick.clear();
-                    streamingEnabled = true;
-                    lastSolverError = "";
-                    ensureSimulationCoordinatorRunning();
-                    feedback(ctx.getSource(), "Streaming enabled");
-                    broadcastState(ctx.getSource().getServer());
-                    return 1;
-                }))
             .then(CommandManager.literal("status")
                 .executes(ctx -> {
                     PublishedFrame currentFrame = publishedFrame.get();
@@ -988,13 +1039,6 @@ public final class AeroServerRuntime {
                         feedback(ctx.getSource(), "Last coordinator error: " + lastCoordinatorError);
                     }
                     sendNestedFeedbackStatus(ctx.getSource());
-                    return 1;
-                }))
-            .then(CommandManager.literal("stop")
-                .executes(ctx -> {
-                    stopStreaming(ctx.getSource().getServer(), false);
-                    feedback(ctx.getSource(), "Streaming disabled");
-                    broadcastState(ctx.getSource().getServer());
                     return 1;
                 }))
             .then(CommandManager.literal("render")
@@ -3409,6 +3453,19 @@ public final class AeroServerRuntime {
         for (MesoscaleGrid grid : grids) {
             grid.runPendingSteps();
         }
+    }
+
+    private void enableStreamingOnServerStart(MinecraftServer server) {
+        currentServer = server;
+        streamingEnabled = true;
+        resetMainThreadProfiling();
+        lastSyncedFlowFrameId = 0L;
+        lastCoarseWindSyncStates.clear();
+        lastFlowAtlasSyncStates.clear();
+        zeroAtlasHoldUntilTick.clear();
+        lastSolverError = "";
+        lastCoordinatorError = "";
+        lastCoordinatorNoPublishReason = "";
     }
 
     private void shutdownAll(MinecraftServer server) {

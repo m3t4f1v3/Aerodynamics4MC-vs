@@ -535,7 +535,7 @@ If you're tuning wind generation, change these first and observe — most behavi
 
 1. Rebuild native if touched: `cd fabric-mod/native && cmake --build build -j`.
 2. `cd fabric-mod && ./gradlew runClient`.
-3. In-game: `/aero start`, then `/aero status` and `/aero dumpdata` to inspect L0/L1.
+3. In-game: `/aero status` and `/aero dumpdata` inspect the automatically running L0/L1 runtime.
 4. Visualize: `python eval_background_snapshot.py …`, `python eval_mesoscale_snapshot.py …`,
    `python eval_l2_capture.py …`. See repo-root `CLAUDE.md` for full command examples.
 5. For native solver in isolation: `python eval_native_solver_experiments.py …`.

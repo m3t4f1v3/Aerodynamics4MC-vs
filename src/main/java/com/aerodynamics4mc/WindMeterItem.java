@@ -4,7 +4,7 @@ import java.util.Locale;
 import java.util.function.Consumer;
 
 import com.aerodynamics4mc.api.AeroWindApi;
-import com.aerodynamics4mc.api.AeroWindSample;
+import com.aerodynamics4mc.api.GameplayWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 
 import net.minecraft.component.type.TooltipDisplayComponent;
@@ -12,6 +12,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.tooltip.TooltipType;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
@@ -42,12 +43,15 @@ public final class WindMeterItem extends Item {
         if (world.isClient()) {
             return ActionResult.SUCCESS;
         }
-        if (!(world instanceof ServerWorld serverWorld)) {
+        if (!(world instanceof ServerWorld)) {
+            return ActionResult.PASS;
+        }
+        if (!(user instanceof ServerPlayerEntity serverPlayer)) {
             return ActionResult.PASS;
         }
 
         Vec3d samplePos = new Vec3d(user.getX(), user.getY() + 1.2, user.getZ());
-        AeroWindSample sample = AeroWindApi.sample(serverWorld, samplePos, SamplePolicy.SERVER_COARSE_ONLY);
+        GameplayWindSample sample = AeroWindApi.sampleGameplay(serverPlayer, samplePos, SamplePolicy.GAMEPLAY_SERVER_ONLY);
         user.getItemCooldownManager().set(user.getStackInHand(hand), 10);
 
         if (!sample.hasFlow()) {
@@ -55,35 +59,60 @@ public final class WindMeterItem extends Item {
             return ActionResult.SUCCESS_SERVER;
         }
 
-        Text direction = directionText(sample.velocityX(), sample.velocityZ());
+        Vec3d effective = sample.effectiveVelocity();
+        Vec3d mean = sample.meanVelocity();
+        Vec3d gust = sample.gustVelocity();
+        Text direction = directionText((float) effective.x, (float) effective.z);
         user.sendMessage(
             Text.translatable(
                 "message.aerodynamics4mc.wind_meter.summary",
-                format(sample.speedMetersPerSecond()),
+                format(sample.effectiveSpeedMetersPerSecond()),
                 direction,
-                signed(sample.velocityX()),
-                signed(sample.velocityY()),
-                signed(sample.velocityZ())
+                signed(effective.x),
+                signed(effective.y),
+                signed(effective.z)
             ).formatted(Formatting.AQUA),
             false
         );
         user.sendMessage(
             Text.translatable(
-                "message.aerodynamics4mc.wind_meter.source",
-                sample.level().name(),
-                sample.authority().name(),
-                format(sample.confidence()),
-                signed(sample.pressure())
+                "message.aerodynamics4mc.wind_meter.mean_gust",
+                format(sample.meanSpeedMetersPerSecond()),
+                signed(mean.x),
+                signed(mean.y),
+                signed(mean.z),
+                format(gust.length()),
+                signed(sample.updraftMetersPerSecond())
             ).formatted(Formatting.GRAY),
             false
         );
-        if (sample.hasAtmosphericDiagnostics()) {
+        user.sendMessage(
+            Text.translatable(
+                "message.aerodynamics4mc.wind_meter.gameplay",
+                format(sample.turbulenceIntensity()),
+                format(sample.windShearMagnitudePerBlock()),
+                percent(sample.shelterFactor()),
+                format(sample.ablMixingStrength())
+            ).formatted(Formatting.DARK_AQUA),
+            false
+        );
+        user.sendMessage(
+            Text.translatable(
+                "message.aerodynamics4mc.wind_meter.source",
+                sample.sourceLevel().name(),
+                sample.authority().name(),
+                percent(sample.confidence()),
+                signed(sample.pressure())
+            ).formatted(Formatting.DARK_GRAY),
+            false
+        );
+        if (sample.hasTemperature() || sample.hasHumidity()) {
             user.sendMessage(
                 Text.translatable(
                     "message.aerodynamics4mc.wind_meter.atmosphere",
-                    format(sample.gustVelocity().length()),
-                    format(sample.turbulenceIntensity()),
-                    format(sample.windShearMagnitudePerBlock())
+                    sample.hasTemperature() ? format(sample.temperatureKelvin() - 273.15f) : "n/a",
+                    sample.hasHumidity() ? percent(sample.humidity()) : "n/a",
+                    format(sample.ablStability())
                 ).formatted(Formatting.DARK_AQUA),
                 false
             );
@@ -118,5 +147,10 @@ public final class WindMeterItem extends Item {
 
     private static String signed(double value) {
         return String.format(Locale.ROOT, "%+.2f", value);
+    }
+
+    private static String percent(double value) {
+        double clamped = Math.max(0.0, Math.min(1.0, Double.isFinite(value) ? value : 0.0));
+        return String.format(Locale.ROOT, "%.0f%%", clamped * 100.0);
     }
 }

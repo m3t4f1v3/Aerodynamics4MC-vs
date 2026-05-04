@@ -43,6 +43,38 @@ public final class AeroWindApi {
         return AeroServerRuntime.sampleFlow(player, position, policy);
     }
 
+    public static GameplayWindSample sampleGameplay(ServerWorld world, Vec3d position) {
+        return AeroServerRuntime.sampleGameplay(world, position);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerWorld world, Vec3d position, SamplePolicy policy) {
+        return AeroServerRuntime.sampleGameplay(world, position, policy);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerWorld world, BlockPos position) {
+        return AeroServerRuntime.sampleGameplay(world, position);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerWorld world, BlockPos position, SamplePolicy policy) {
+        return AeroServerRuntime.sampleGameplay(world, position, policy);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, Vec3d position) {
+        return AeroServerRuntime.sampleGameplay(player, position);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, Vec3d position, SamplePolicy policy) {
+        return AeroServerRuntime.sampleGameplay(player, position, policy);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, BlockPos position) {
+        return AeroServerRuntime.sampleGameplay(player, position);
+    }
+
+    public static GameplayWindSample sampleGameplay(ServerPlayerEntity player, BlockPos position, SamplePolicy policy) {
+        return AeroServerRuntime.sampleGameplay(player, position, policy);
+    }
+
     public static Vec3d sampleMeanVelocity(ServerWorld world, Vec3d position) {
         return sample(world, position).meanVelocity();
     }
@@ -57,5 +89,21 @@ public final class AeroWindApi {
 
     public static Vec3d sampleEffectiveVelocity(ServerPlayerEntity player, Vec3d position) {
         return sample(player, position).effectiveVelocity();
+    }
+
+    public static Vec3d sampleGameplayMeanVelocity(ServerWorld world, Vec3d position) {
+        return sampleGameplay(world, position).meanVelocity();
+    }
+
+    public static Vec3d sampleGameplayEffectiveVelocity(ServerWorld world, Vec3d position) {
+        return sampleGameplay(world, position).effectiveVelocity();
+    }
+
+    public static Vec3d sampleGameplayMeanVelocity(ServerPlayerEntity player, Vec3d position) {
+        return sampleGameplay(player, position).meanVelocity();
+    }
+
+    public static Vec3d sampleGameplayEffectiveVelocity(ServerPlayerEntity player, Vec3d position) {
+        return sampleGameplay(player, position).effectiveVelocity();
     }
 }

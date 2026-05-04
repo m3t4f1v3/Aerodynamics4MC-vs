@@ -6,6 +6,10 @@ This document defines the stable wind sampling contract for gameplay systems and
 
 Consumers should sample wind through the API facade instead of reading internal `L0`, `L1`, `L2`, visualizer, or native solver state.
 
+For gameplay, prefer `GameplayWindSample`.
+
+Use `AeroWindSample` when you need raw or diagnostic data.
+
 ## Public Entry Points
 
 Server side:
@@ -13,7 +17,11 @@ Server side:
 ```java
 import com.aerodynamics4mc.api.AeroWindApi;
 import com.aerodynamics4mc.api.AeroWindSample;
+import com.aerodynamics4mc.api.GameplayWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
+
+GameplayWindSample gameplay = AeroWindApi.sampleGameplay(serverWorld, position);
+GameplayWindSample gameplay = AeroWindApi.sampleGameplay(player, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
 
 AeroWindSample sample = AeroWindApi.sample(serverWorld, position);
 AeroWindSample sample = AeroWindApi.sample(player, position, SamplePolicy.SERVER_COARSE_ONLY);
@@ -31,6 +39,40 @@ AeroWindSample sample = AeroClientWindApi.sample(clientWorld, position, SamplePo
 ```
 
 ## Sample Data
+
+`GameplayWindSample` is the recommended gameplay record.
+
+In-game verification:
+
+- The Wind Meter item samples `AeroWindApi.sampleGameplay(...)`.
+- Its chat output shows effective wind, mean wind, gust, updraft, turbulence, shear, shelter, confidence, and source authority.
+- The Wind Turbine Probe block samples `AeroWindApi.sampleGameplay(...)`, estimates turbine output, and emits redstone power from `0` to `15`.
+- This is the intended player-facing debug surface for v0.1 gameplay integrations.
+
+Gameplay wind:
+
+- `meanX`, `meanY`, `meanZ`: stable mean wind in m/s.
+- `gustX`, `gustY`, `gustZ`: bounded gust contribution in m/s.
+- `effectiveVelocity()`: mean plus gust, already constrained for gameplay.
+- `updraftMetersPerSecond`: vertical usable wind signal.
+- `turbulenceIntensity`: gameplay turbulence magnitude.
+- `windShearMagnitudePerBlock`: local shear proxy.
+- `shelterFactor`: normalized wind shelter from `0` to `1`.
+- `pressure`: pressure anomaly or pressure proxy.
+- `temperatureKelvin`
+- `humidity`
+- `ablStability`
+- `ablMixingStrength`
+- `confidence`: normalized trust/confidence from `0` to `1`.
+- `sourceLevel`: dominant source scale: `NONE`, `L0`, `L1`, or `L2`.
+- `authority`: trust/source authority.
+
+Important behavior:
+
+- If the raw source is L2, gameplay sampling treats it as a local modifier over L1/L0.
+- L2 local deltas are bounded to avoid raw CFD noise dominating gameplay.
+- Client-local L2 is not server-trusted.
+- `GameplayWindSample` is the stable contract for blocks, machines, flight feedback, and integrations.
 
 `AeroWindSample` is the public sample record.
 
@@ -157,12 +199,15 @@ Smoke, steam, ash, dust:
 
 Wind turbines and outdoor machines:
 
-- `SERVER_COARSE_ONLY` unless local obstruction is explicitly part of the gameplay.
+- `AeroWindApi.sampleGameplay(...)`.
+- Prefer `SERVER_COARSE_ONLY` unless local obstruction is explicitly part of the gameplay.
+- The built-in Wind Turbine Probe is the minimal reference implementation: sample gameplay wind, derate by shelter/turbulence/confidence, then map output to redstone.
 
 Building ventilation, ducts, chimneys, fans:
 
 - L2-capable policies are appropriate.
 - Prefer client-local L2 for visuals and server L2 only if trusted gameplay requires it.
+- Gameplay logic should consume `GameplayWindSample`, not raw L2 velocity.
 
 ## Contract Boundaries
 
@@ -187,14 +232,15 @@ Consumers may:
 ## Minimal Integration Pattern
 
 ```java
-AeroWindSample sample = AeroWindApi.sample(player, position, SamplePolicy.SERVER_COARSE_ONLY);
-if (!sample.hasFlow()) {
+GameplayWindSample wind = AeroWindApi.sampleGameplay(player, position, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+if (!wind.hasFlow()) {
     return;
 }
 
-Vec3d meanWind = sample.meanVelocity();
-Vec3d gust = sample.gustVelocity();
-float turbulence = sample.turbulenceIntensity();
+Vec3d meanWind = wind.meanVelocity();
+Vec3d effectiveWind = wind.effectiveVelocity();
+float turbulence = wind.turbulenceIntensity();
+float shelter = wind.shelterFactor();
 ```
 
 For client particles:
