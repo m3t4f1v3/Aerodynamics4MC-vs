@@ -268,6 +268,53 @@ constexpr int k_nested_feedback_value_bottom_mass_flux = 7;
 constexpr int k_nested_feedback_value_top_area = 8;
 constexpr int k_nested_feedback_value_top_mass_flux = 9;
 
+struct CompactBrickPacketSummary {
+    bool supported = false;
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float vz = 0.0f;
+};
+
+CompactBrickPacketSummary summarize_compact_brick_packet(const std::vector<float>& packet) {
+    CompactBrickPacketSummary summary{};
+    if (packet.empty() || (packet.size() % k_packet_channels) != 0) {
+        return summary;
+    }
+    double vx_sum = 0.0;
+    double vy_sum = 0.0;
+    double vz_sum = 0.0;
+    int fluid_cells = 0;
+    const size_t cells = packet.size() / k_packet_channels;
+    for (size_t cell = 0; cell < cells; ++cell) {
+        const size_t base = cell * k_packet_channels;
+        if (packet[base + k_channel_obstacle] > 0.5f) {
+            continue;
+        }
+        if (packet[base + k_channel_fan_mask] > 0.5f
+            || std::fabs(packet[base + k_channel_thermal_source]) > 1.0e-8f) {
+            return summary;
+        }
+        const float vx = packet[base + k_channel_state_vx];
+        const float vy = packet[base + k_channel_state_vy];
+        const float vz = packet[base + k_channel_state_vz];
+        if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)) {
+            continue;
+        }
+        vx_sum += vx;
+        vy_sum += vy;
+        vz_sum += vz;
+        fluid_cells++;
+    }
+    if (fluid_cells <= 0) {
+        return summary;
+    }
+    summary.supported = true;
+    summary.vx = static_cast<float>(vx_sum / fluid_cells);
+    summary.vy = static_cast<float>(vy_sum / fluid_cells);
+    summary.vz = static_cast<float>(vz_sum / fluid_cells);
+    return summary;
+}
+
 bool env_flag_enabled(const char* name, bool default_value = false) {
     const char* value = std::getenv(name);
     if (!value) return default_value;
@@ -1322,11 +1369,29 @@ bool step_brick_actual(
     if (!build_brick_step_packet(runtime, coord, brick, dynamic, brick.packet_cache)) {
         return false;
     }
+    const bool had_context = brick.context_key != 0;
     if (brick.context_key == 0) {
         brick.context_key = allocate_internal_context_key(service);
     }
     const int size = runtime.brick_size;
-    if (!aero_lbm_step_rect(brick.packet_cache.data(), size, size, size, brick.context_key, nullptr)) {
+    bool step_ok = false;
+    if (simulation_compact_enabled()) {
+        const CompactBrickPacketSummary compact_summary = summarize_compact_brick_packet(brick.packet_cache);
+        if (compact_summary.supported
+            && configure_simulation_compact_boundary(compact_summary.vx, compact_summary.vy, compact_summary.vz, size, size, size)) {
+            if (had_context) {
+                step_ok = aero_lbm_step_rect_cached(size, size, size, brick.context_key, nullptr) != 0;
+            }
+            if (!step_ok) {
+                step_ok = aero_lbm_step_rect(brick.packet_cache.data(), size, size, size, brick.context_key, nullptr) != 0;
+            }
+        }
+        aero_lbm_benchmark_reset_config();
+    }
+    if (!step_ok) {
+        step_ok = aero_lbm_step_rect(brick.packet_cache.data(), size, size, size, brick.context_key, nullptr) != 0;
+    }
+    if (!step_ok) {
         set_simulation_last_error(
             "brick_step_actual: aero_lbm_step_rect failed at ("
                 + std::to_string(coord.x) + ","

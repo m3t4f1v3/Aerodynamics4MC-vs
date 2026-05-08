@@ -33,22 +33,64 @@ import net.minecraft.util.math.Vec3d;
 final class ClientL2Solver {
     private static final Logger LOGGER = LoggerFactory.getLogger("aerodynamics4mc/ClientL2Solver");
 
-    private static final int BRICK_SIZE = 32;
+    private static final int BRICK_SIZE = configuredBrickSize();
     private static final int CELL_COUNT = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;
     private static final int FLOW_CHANNELS = NativeSimulationBridge.FLOW_STATE_CHANNELS;
     private static final int PACKED_CHANNELS = NativeSimulationBridge.PACKED_ATLAS_CHANNELS;
     private static final int FACE_COUNT = Direction.values().length;
     private static final int STATIC_REFRESH_TICKS = -1;
-    private static final int LOCAL_PUBLISH_INTERVAL_TICKS = 1;
-    private static final int SOLVE_INTERVAL_TICKS = 1;
+    private static final int LOCAL_PUBLISH_INTERVAL_TICKS = configuredInt(
+        "a4mc.clientL2.publishIntervalTicks",
+        "AERO_LBM_CLIENT_L2_PUBLISH_INTERVAL_TICKS",
+        1,
+        1,
+        200
+    );
+    private static final int SOLVE_INTERVAL_TICKS = configuredInt(
+        "a4mc.clientL2.solveIntervalTicks",
+        "AERO_LBM_CLIENT_L2_SOLVE_INTERVAL_TICKS",
+        1,
+        1,
+        200
+    );
     private static final int BOUNDARY_REFERENCE_REFRESH_MIN_TICKS = 40;
     private static final int FAST_SUSPEND_COOLDOWN_TICKS = 10;
-    private static final int STATIC_BUILD_CELLS_PER_TICK = 1024;
-    private static final int COARSE_SEED_CELLS_PER_TICK = 4096;
-    private static final int STATIC_CACHE_MAX_BRICKS = 32;
+    private static final int STATIC_BUILD_CELLS_PER_TICK = configuredInt(
+        "a4mc.clientL2.staticBuildCellsPerTick",
+        "AERO_LBM_CLIENT_L2_STATIC_BUILD_CELLS_PER_TICK",
+        BRICK_SIZE >= 128 ? 65536 : 1024,
+        1,
+        CELL_COUNT
+    );
+    private static final int COARSE_SEED_CELLS_PER_TICK = configuredInt(
+        "a4mc.clientL2.coarseSeedCellsPerTick",
+        "AERO_LBM_CLIENT_L2_COARSE_SEED_CELLS_PER_TICK",
+        BRICK_SIZE >= 128 ? 131072 : 4096,
+        1,
+        CELL_COUNT
+    );
+    private static final int STATIC_CACHE_MAX_BRICKS = configuredInt(
+        "a4mc.clientL2.staticCacheMaxBricks",
+        "AERO_LBM_CLIENT_L2_STATIC_CACHE_MAX_BRICKS",
+        BRICK_SIZE >= 128 ? 2 : 32,
+        0,
+        64
+    );
     private static final int COUPLING_BAND_CELLS = 8;
-    private static final int MAX_CLIENT_ACTIVE_BRICKS = 2;
-    private static final int MAX_STEPS_PER_CLIENT_TICK = 1;
+    private static final int MAX_CLIENT_ACTIVE_BRICKS = configuredInt(
+        "a4mc.clientL2.maxActiveBricks",
+        "AERO_LBM_CLIENT_L2_MAX_ACTIVE_BRICKS",
+        BRICK_SIZE >= 128 ? 1 : 2,
+        1,
+        8
+    );
+    private static final int MAX_STEPS_PER_CLIENT_TICK = configuredInt(
+        "a4mc.clientL2.maxStepsPerClientTick",
+        "AERO_LBM_CLIENT_L2_MAX_STEPS_PER_CLIENT_TICK",
+        1,
+        1,
+        16
+    );
     private static final float DT_SECONDS = 0.05f;
     private static final float DX_METERS = 1.0f;
     private static final float NATIVE_VELOCITY_SCALE = DX_METERS / DT_SECONDS;
@@ -144,6 +186,49 @@ final class ClientL2Solver {
 
     ClientL2Solver(AeroVisualizer visualizer) {
         this.visualizer = visualizer;
+    }
+
+    private static int configuredBrickSize() {
+        int requested = configuredInt(
+            "a4mc.clientL2.brickSize",
+            "AERO_LBM_CLIENT_L2_BRICK_SIZE",
+            32,
+            16,
+            128
+        );
+        int aligned = Math.max(16, Math.min(128, (requested / 16) * 16));
+        if (aligned != requested) {
+            LOGGER.warn("Client L2 brick size {} is not chunk-aligned; using {}", requested, aligned);
+        }
+        return aligned;
+    }
+
+    private static int configuredInt(String propertyName, String envName, int defaultValue, int min, int max) {
+        String value = System.getProperty(propertyName);
+        if (value == null || value.isBlank()) {
+            value = System.getenv(envName);
+        }
+        if (value == null || value.isBlank()) {
+            return MathHelper.clamp(defaultValue, min, max);
+        }
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            int clamped = MathHelper.clamp(parsed, min, max);
+            if (clamped != parsed) {
+                LOGGER.warn(
+                    "Client L2 config {}={} outside [{}, {}]; using {}",
+                    propertyName,
+                    parsed,
+                    min,
+                    max,
+                    clamped
+                );
+            }
+            return clamped;
+        } catch (NumberFormatException ignored) {
+            LOGGER.warn("Client L2 config {}={} is not an integer; using {}", propertyName, value, defaultValue);
+            return MathHelper.clamp(defaultValue, min, max);
+        }
     }
 
     void initialize() {
@@ -1802,14 +1887,20 @@ final class ClientL2Solver {
         }
         return "client L2 localSolve=on streaming=" + streamingEnabled
             + " disabled=" + clientSolveDisabled
+            + " brickSize=" + BRICK_SIZE
+            + " cells=" + CELL_COUNT
             + " activeBricks=" + activeBrickCount
             + " worker=" + worker.status()
             + " staticCache=" + staticBrickCache.size()
+            + "/" + STATIC_CACHE_MAX_BRICKS
             + " staticPatches=" + lastStaticPatchCount
             + " fanPatchCells=" + lastFanPatchCellCount
             + " heatPatchCells=" + lastHeatPatchCellCount
             + " solveInterval=" + SOLVE_INTERVAL_TICKS
             + " publishInterval=" + LOCAL_PUBLISH_INTERVAL_TICKS
+            + " maxActive=" + MAX_CLIENT_ACTIVE_BRICKS
+            + " prepBudget=" + STATIC_BUILD_CELLS_PER_TICK
+            + " seedBudget=" + COARSE_SEED_CELLS_PER_TICK
             + " prep=" + stagedPreparationStatus()
             + " fastSuspendUntil=" + fastSuspendUntilGameTime
             + " lastServerTick=" + lastServerTick;
