@@ -561,7 +561,18 @@ struct ContextState {
     cl_mem d_temp_scratch = nullptr;
     cl_mem d_thermal_f = nullptr;
     cl_mem d_thermal_f_post = nullptr;
+
+    bool compact_buffers_ready = false;
+    bool compact_initialized = false;
+    bool compact_output_ready = false;
+    cl_mem d_compact_state = nullptr;
+    cl_mem d_compact_state_next = nullptr;
+    cl_mem d_compact_solid = nullptr;
+    cl_mem d_compact_output = nullptr;
 #endif
+
+    std::vector<uint8_t> compact_solid_cache;
+    std::vector<std::uint16_t> compact_state_staging;
 };
 
 Config g_cfg;
@@ -1106,6 +1117,38 @@ inline bool finitef(float v) {
 
 inline float finite_or(float v, float fallback) {
     return finitef(v) ? v : fallback;
+}
+
+std::uint16_t float_to_half_bits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    const std::uint32_t sign = (bits >> 16) & 0x8000u;
+    std::uint32_t mantissa = bits & 0x007fffffu;
+    int exponent = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return static_cast<std::uint16_t>(sign);
+        }
+        mantissa |= 0x00800000u;
+        const int shift = 14 - exponent;
+        std::uint32_t half_mantissa = mantissa >> shift;
+        if ((mantissa >> (shift - 1)) & 1u) {
+            ++half_mantissa;
+        }
+        return static_cast<std::uint16_t>(sign | half_mantissa);
+    }
+
+    if (exponent >= 31) {
+        return static_cast<std::uint16_t>(sign | 0x7c00u);
+    }
+
+    std::uint32_t half = sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13);
+    if (mantissa & 0x00001000u) {
+        ++half;
+    }
+    return static_cast<std::uint16_t>(half);
 }
 
 inline float feq(int q, float rho, float ux, float uy, float uz) {
@@ -2444,6 +2487,8 @@ struct OpenClRuntime {
     cl_kernel k_stream_collide_tgv = nullptr;
     cl_kernel k_stream_collide_hydro_bench = nullptr;
     cl_kernel k_stream_collide_hydro_forced = nullptr;
+    cl_kernel k_compact_macro_step = nullptr;
+    cl_kernel k_compact_output = nullptr;
     cl_kernel k_output = nullptr;
     cl_kernel k_output_strided = nullptr;
 };
@@ -4214,6 +4259,202 @@ kernel void stream_collide_hydro_benchmark_step(
 
 )CLC"
 R"CLC(
+inline float half_bits_to_float(ushort h) {
+    uint sign = ((uint)h & 0x8000u) << 16;
+    int exp = (int)(((uint)h >> 10) & 0x1fu);
+    uint mant = (uint)h & 0x03ffu;
+    uint bits = 0u;
+    if (exp == 0) {
+        if (mant == 0u) {
+            bits = sign;
+        } else {
+            int e = -14;
+            while ((mant & 0x0400u) == 0u) {
+                mant <<= 1;
+                --e;
+            }
+            mant &= 0x03ffu;
+            bits = sign | ((uint)(e + 127) << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7f800000u | (mant << 13);
+    } else {
+        bits = sign | ((uint)(exp + 112) << 23) | (mant << 13);
+    }
+    return as_float(bits);
+}
+
+inline ushort float_to_half_bits_opencl(float value) {
+    uint bits = as_uint(value);
+    uint sign = (bits >> 16) & 0x8000u;
+    uint mant = bits & 0x007fffffu;
+    int exp = (int)((bits >> 23) & 0xffu) - 127 + 15;
+    if (exp <= 0) {
+        if (exp < -10) return (ushort)sign;
+        mant |= 0x00800000u;
+        int shift = 14 - exp;
+        uint half_mant = mant >> shift;
+        if (((mant >> (shift - 1)) & 1u) != 0u) ++half_mant;
+        return (ushort)(sign | half_mant);
+    }
+    if (exp >= 31) return (ushort)(sign | 0x7c00u);
+    uint half_value = sign | ((uint)exp << 10) | (mant >> 13);
+    if ((mant & 0x00001000u) != 0u) ++half_value;
+    return (ushort)half_value;
+}
+
+inline float4 compact_load4(__global const ushort4* state, int cell) {
+    ushort4 packed = state[cell];
+    return (float4)(
+        half_bits_to_float(packed.s0),
+        half_bits_to_float(packed.s1),
+        half_bits_to_float(packed.s2),
+        half_bits_to_float(packed.s3)
+    );
+}
+
+inline ushort4 compact_pack4(float4 value) {
+    return (ushort4)(
+        float_to_half_bits_opencl(value.x),
+        float_to_half_bits_opencl(value.y),
+        float_to_half_bits_opencl(value.z),
+        float_to_half_bits_opencl(value.w)
+    );
+}
+
+inline float4 compact_neighbor_or_boundary(
+    __global const ushort4* state,
+    __global const uchar* solid,
+    int nx,
+    int ny,
+    int nz,
+    int x,
+    int y,
+    int z,
+    float4 self_value,
+    float4 inlet_value
+) {
+    if (x < 0) return inlet_value;
+    if (x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return self_value;
+    int cell = (x * ny + y) * nz + z;
+    if (solid[cell] != 0) return (float4)(0.0f, 0.0f, 0.0f, self_value.w);
+    return compact_load4(state, cell);
+}
+
+kernel void compact_macro_step(
+    __global const ushort4* state_read,
+    __global const uchar* solid,
+    int nx,
+    int ny,
+    int nz,
+    int cells,
+    float4 inlet_value,
+    float viscosity_alpha,
+    __global ushort4* state_write
+) {
+    int cell = (int)get_global_id(0);
+    if (cell >= cells) return;
+
+    int yz = ny * nz;
+    int x = cell / yz;
+    int rem = cell - x * yz;
+    int y = rem / nz;
+    int z = rem - y * nz;
+
+    if (solid[cell] != 0) {
+        state_write[cell] = (ushort4)(0, 0, 0, float_to_half_bits_opencl(0.0f));
+        return;
+    }
+
+    float4 center = compact_load4(state_read, cell);
+    float4 xm = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x - 1, y, z, center, inlet_value);
+    float4 xp = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x + 1, y, z, center, inlet_value);
+    float4 ym = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x, y - 1, z, center, inlet_value);
+    float4 yp = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x, y + 1, z, center, inlet_value);
+    float4 zm = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x, y, z - 1, center, inlet_value);
+    float4 zp = compact_neighbor_or_boundary(state_read, solid, nx, ny, nz, x, y, z + 1, center, inlet_value);
+
+    float3 wind = inlet_value.xyz;
+    float ax = fabs(wind.x);
+    float ay = fabs(wind.y);
+    float az = fabs(wind.z);
+    float4 upstream = center;
+    if (ax >= ay && ax >= az) {
+        upstream = wind.x >= 0.0f ? xm : xp;
+    } else if (ay >= az) {
+        upstream = wind.y >= 0.0f ? ym : yp;
+    } else {
+        upstream = wind.z >= 0.0f ? zm : zp;
+    }
+
+    float4 avg = (xm + xp + ym + yp + zm + zp) * (1.0f / 6.0f);
+    float speed = length(wind);
+    float advect_alpha = clampf(speed * 1.75f, 0.02f, 0.65f);
+    float diffuse_alpha = clampf(viscosity_alpha, 0.03f, 0.35f);
+
+    float3 u = mix(center.xyz, upstream.xyz, advect_alpha);
+    u += diffuse_alpha * (avg.xyz - center.xyz);
+
+    float inlet_blend = 0.0f;
+    if (x <= 0) {
+        inlet_blend = 1.0f;
+    } else if (x < 4) {
+        inlet_blend = 0.20f * (4.0f - (float)x);
+    }
+    u = mix(u, wind, clampf(inlet_blend, 0.0f, 1.0f));
+
+    float solid_contact = 0.0f;
+    solid_contact += (x + 1 < nx && solid[((x + 1) * ny + y) * nz + z] != 0) ? 1.0f : 0.0f;
+    solid_contact += (x - 1 >= 0 && solid[((x - 1) * ny + y) * nz + z] != 0) ? 1.0f : 0.0f;
+    solid_contact += (y + 1 < ny && solid[(x * ny + y + 1) * nz + z] != 0) ? 1.0f : 0.0f;
+    solid_contact += (y - 1 >= 0 && solid[(x * ny + y - 1) * nz + z] != 0) ? 1.0f : 0.0f;
+    solid_contact += (z + 1 < nz && solid[(x * ny + y) * nz + z + 1] != 0) ? 1.0f : 0.0f;
+    solid_contact += (z - 1 >= 0 && solid[(x * ny + y) * nz + z - 1] != 0) ? 1.0f : 0.0f;
+    u *= 1.0f - clampf(0.12f * solid_contact, 0.0f, 0.72f);
+
+    float max_speed = fmax(0.04f, fmin(0.34641016f, fmax(speed * 1.8f, 0.18f)));
+    float speed2 = dot(u, u);
+    if (speed2 > max_speed * max_speed && speed2 > 0.0f) {
+        u *= max_speed * rsqrt(speed2);
+    }
+
+    float div = (xp.x - xm.x) + (yp.y - ym.y) + (zp.z - zm.z);
+    float pressure = center.w + 0.10f * (avg.w - center.w) - 0.035f * div + 0.003f * solid_contact;
+    if (x <= 0) {
+        pressure = inlet_value.w;
+    } else if (x >= nx - 2) {
+        u = mix(u, xm.xyz, 0.45f);
+        pressure *= 0.55f;
+    }
+    pressure = clampf(pressure, P_MIN, P_MAX);
+
+    state_write[cell] = compact_pack4((float4)(u.x, u.y, u.z, pressure));
+}
+
+kernel void compact_output_macro(
+    __global const ushort4* state,
+    __global const uchar* solid,
+    int out_ch,
+    int cells,
+    __global float* out
+) {
+    int cell = (int)get_global_id(0);
+    if (cell >= cells) return;
+    int out_base = cell * out_ch;
+    if (solid[cell] != 0) {
+        for (int c = 0; c < out_ch; ++c) out[out_base + c] = 0.0f;
+        return;
+    }
+    float4 value = compact_load4(state, cell);
+    out[out_base + 0] = value.x;
+    out[out_base + 1] = value.y;
+    out[out_base + 2] = value.z;
+    out[out_base + 3] = clampf(value.w, P_MIN, P_MAX);
+    for (int c = 4; c < out_ch; ++c) out[out_base + c] = 0.0f;
+}
+
+)CLC"
+R"CLC(
 kernel void output_macro(
     __global const float* f, __global const float* payload,
     int in_ch, int out_ch, int cells, __global float* out
@@ -4378,6 +4619,8 @@ std::string format_opencl_api_error(const char* api, cl_int err) {
 
 void release_opencl_runtime() {
     if (g_opencl.k_output_strided) clReleaseKernel(g_opencl.k_output_strided);
+    if (g_opencl.k_compact_output) clReleaseKernel(g_opencl.k_compact_output);
+    if (g_opencl.k_compact_macro_step) clReleaseKernel(g_opencl.k_compact_macro_step);
     if (g_opencl.k_apply_temperature_reference) clReleaseKernel(g_opencl.k_apply_temperature_reference);
     if (g_opencl.k_thermal_bfecc_finalize) clReleaseKernel(g_opencl.k_thermal_bfecc_finalize);
     if (g_opencl.k_thermal_bfecc_correct) clReleaseKernel(g_opencl.k_thermal_bfecc_correct);
@@ -4394,6 +4637,10 @@ void release_opencl_runtime() {
 }
 
 void release_context_gpu_buffers(ContextState& ctx) {
+    if (ctx.d_compact_output) clReleaseMemObject(ctx.d_compact_output);
+    if (ctx.d_compact_solid) clReleaseMemObject(ctx.d_compact_solid);
+    if (ctx.d_compact_state_next) clReleaseMemObject(ctx.d_compact_state_next);
+    if (ctx.d_compact_state) clReleaseMemObject(ctx.d_compact_state);
     if (ctx.d_thermal_f_post) clReleaseMemObject(ctx.d_thermal_f_post);
     if (ctx.d_thermal_f) clReleaseMemObject(ctx.d_thermal_f);
     if (ctx.d_temp_scratch) clReleaseMemObject(ctx.d_temp_scratch);
@@ -4403,7 +4650,11 @@ void release_context_gpu_buffers(ContextState& ctx) {
     if (ctx.d_f_post) clReleaseMemObject(ctx.d_f_post);
     if (ctx.d_f) clReleaseMemObject(ctx.d_f);
     if (ctx.d_payload) clReleaseMemObject(ctx.d_payload);
+    ctx.d_compact_output = ctx.d_compact_solid = ctx.d_compact_state_next = ctx.d_compact_state = nullptr;
     ctx.d_thermal_f_post = ctx.d_thermal_f = ctx.d_temp_scratch = ctx.d_temp_next = ctx.d_temp = ctx.d_output = ctx.d_f_post = ctx.d_f = ctx.d_payload = nullptr;
+    ctx.compact_buffers_ready = false;
+    ctx.compact_initialized = false;
+    ctx.compact_output_ready = false;
     ctx.gpu_buffers_ready = ctx.gpu_initialized = false;
 }
 
@@ -4466,11 +4717,14 @@ bool initialize_opencl_runtime() {
     cl_kernel k_stream_collide_tgv = clCreateKernel(program, "stream_collide_tgv_step", &err);
     cl_kernel k_stream_collide_hydro_bench = clCreateKernel(program, "stream_collide_hydro_benchmark_step", &err);
     cl_kernel k_stream_collide_hydro_forced = clCreateKernel(program, "stream_collide_hydro_forced_step", &err);
+    cl_kernel k_compact_macro_step = clCreateKernel(program, "compact_macro_step", &err);
+    cl_kernel k_compact_output = clCreateKernel(program, "compact_output_macro", &err);
     cl_kernel k_output = clCreateKernel(program, "output_macro", &err);
     cl_kernel k_output_strided = clCreateKernel(program, "output_macro_strided", &err);
 
     if (!k_init || !k_apply_temperature_reference || !k_thermal_bfecc_forward || !k_thermal_bfecc_correct || !k_thermal_bfecc_finalize
-        || !k_stream_collide_tgv || !k_stream_collide_hydro_bench || !k_stream_collide_hydro_forced || !k_output
+        || !k_stream_collide_tgv || !k_stream_collide_hydro_bench || !k_stream_collide_hydro_forced
+        || !k_compact_macro_step || !k_compact_output || !k_output
         || !k_output_strided) {
         if (k_init) clReleaseKernel(k_init);
         if (k_apply_temperature_reference) clReleaseKernel(k_apply_temperature_reference);
@@ -4480,6 +4734,8 @@ bool initialize_opencl_runtime() {
         if (k_stream_collide_tgv) clReleaseKernel(k_stream_collide_tgv);
         if (k_stream_collide_hydro_bench) clReleaseKernel(k_stream_collide_hydro_bench);
         if (k_stream_collide_hydro_forced) clReleaseKernel(k_stream_collide_hydro_forced);
+        if (k_compact_macro_step) clReleaseKernel(k_compact_macro_step);
+        if (k_compact_output) clReleaseKernel(k_compact_output);
         if (k_output) clReleaseKernel(k_output);
         if (k_output_strided) clReleaseKernel(k_output_strided);
         clReleaseProgram(program); clReleaseCommandQueue(queue); clReleaseContext(context);
@@ -4495,6 +4751,8 @@ bool initialize_opencl_runtime() {
     g_opencl.k_stream_collide_tgv = k_stream_collide_tgv;
     g_opencl.k_stream_collide_hydro_bench = k_stream_collide_hydro_bench;
     g_opencl.k_stream_collide_hydro_forced = k_stream_collide_hydro_forced;
+    g_opencl.k_compact_macro_step = k_compact_macro_step;
+    g_opencl.k_compact_output = k_compact_output;
     g_opencl.k_output = k_output;
     g_opencl.k_output_strided = k_output_strided;
     g_opencl.platform = selected_platform; g_opencl.device = selected_device;
@@ -4575,6 +4833,247 @@ cl_int enqueue_kernel_1d(cl_kernel kernel, int cells) {
     return clEnqueueNDRangeKernel(g_opencl.queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr);
 }
 
+bool compact_realtime_env_enabled() {
+    const char* primary = std::getenv("AERO_LBM_COMPACT_REALTIME");
+    const char* legacy = std::getenv("AERO_LBM_REALTIME_COMPACT");
+    const char* env = primary ? primary : legacy;
+    if (!env) return true;
+    return std::strcmp(env, "0") != 0
+        && std::strcmp(env, "false") != 0
+        && std::strcmp(env, "FALSE") != 0
+        && std::strcmp(env, "off") != 0
+        && std::strcmp(env, "OFF") != 0;
+}
+
+bool compact_realtime_path_enabled(int overlay_count) {
+    return compact_realtime_env_enabled()
+        && benchmark_mode_active()
+        && g_benchmark_cfg.preset == AERO_LBM_BENCHMARK_PRESET_NONE
+        && overlay_count == 0
+        && g_cfg.input_channels >= 9
+        && g_cfg.output_channels >= 4;
+}
+
+OpenClFaceData compact_inlet_value() {
+    const AeroLbmBoundaryFaceConfig& x_min = g_benchmark_cfg.x_min;
+    float vx = g_benchmark_cfg.initial_velocity[0];
+    float vy = g_benchmark_cfg.initial_velocity[1];
+    float vz = g_benchmark_cfg.initial_velocity[2];
+    if (x_min.hydrodynamic_kind == AERO_LBM_HYDRO_BOUNDARY_VELOCITY_DIRICHLET
+        || x_min.hydrodynamic_kind == AERO_LBM_HYDRO_BOUNDARY_MOVING_WALL) {
+        vx = x_min.velocity[0];
+        vy = x_min.velocity[1];
+        vz = x_min.velocity[2];
+    }
+    float speed2 = vx * vx + vy * vy + vz * vz;
+    if (speed2 > kMaxSpeed * kMaxSpeed && speed2 > 0.0f) {
+        const float scale = kMaxSpeed / std::sqrt(speed2);
+        vx *= scale;
+        vy *= scale;
+        vz *= scale;
+    }
+    return {{vx, vy, vz, clampf(x_min.pressure, kPressureMin, kPressureMax)}};
+}
+
+float compact_viscosity_alpha() {
+    return clampf(0.08f + 8.0f * effective_base_nu_shear(), 0.05f, 0.22f);
+}
+
+bool ensure_compact_gpu_buffers(ContextState& ctx, bool wants_output) {
+    if (!g_opencl.available || ctx.cells == 0) return false;
+
+    auto create_buffer = [&](cl_mem& target, cl_mem_flags flags, std::size_t bytes, const char* label) -> bool {
+        cl_int err = CL_SUCCESS;
+        target = clCreateBuffer(g_opencl.context, flags, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !target) {
+            g_opencl.error = format_opencl_api_error(label, err);
+            return false;
+        }
+        return true;
+    };
+
+    if (!ctx.compact_buffers_ready) {
+        const std::size_t state_bytes = ctx.cells * 4u * sizeof(std::uint16_t);
+        const std::size_t solid_bytes = ctx.cells * sizeof(std::uint8_t);
+        if (!create_buffer(ctx.d_compact_state, CL_MEM_READ_WRITE, state_bytes, "clCreateBuffer(d_compact_state)")
+            || !create_buffer(ctx.d_compact_state_next, CL_MEM_READ_WRITE, state_bytes, "clCreateBuffer(d_compact_state_next)")
+            || !create_buffer(ctx.d_compact_solid, CL_MEM_READ_ONLY, solid_bytes, "clCreateBuffer(d_compact_solid)")) {
+            release_context_gpu_buffers(ctx);
+            return false;
+        }
+        ctx.compact_buffers_ready = true;
+        ctx.compact_initialized = false;
+    }
+
+    if (wants_output && !ctx.compact_output_ready) {
+        const std::size_t output_bytes = ctx.cells * g_cfg.output_channels * sizeof(float);
+        if (!create_buffer(ctx.d_compact_output, CL_MEM_WRITE_ONLY, output_bytes, "clCreateBuffer(d_compact_output)")) {
+            release_context_gpu_buffers(ctx);
+            return false;
+        }
+        ctx.compact_output_ready = true;
+    }
+    return true;
+}
+
+bool upload_compact_initial_state(ContextState& ctx, const float* payload) {
+    if (!payload) {
+        if (ctx.compact_initialized) return true;
+        g_opencl.error = "compact realtime cached step requested before initialization";
+        return false;
+    }
+    if (!ctx.compact_buffers_ready) {
+        g_opencl.error = "compact realtime buffers not allocated";
+        return false;
+    }
+
+    ctx.compact_solid_cache.assign(ctx.cells, 0u);
+    ctx.compact_state_staging.assign(ctx.cells * 4u, 0u);
+    for (std::size_t cell = 0; cell < ctx.cells; ++cell) {
+        const std::size_t base = cell * static_cast<std::size_t>(g_cfg.input_channels);
+        const bool solid = payload[base + kChannelObstacle] > 0.5f;
+        ctx.compact_solid_cache[cell] = solid ? 1u : 0u;
+
+        float vx = solid ? 0.0f : finite_or(payload[base + kChannelStateVx], 0.0f);
+        float vy = solid ? 0.0f : finite_or(payload[base + kChannelStateVy], 0.0f);
+        float vz = solid ? 0.0f : finite_or(payload[base + kChannelStateVz], 0.0f);
+        const float pressure = solid ? 0.0f : clampf(finite_or(payload[base + kChannelStateP], 0.0f), kPressureMin, kPressureMax);
+        float speed2 = vx * vx + vy * vy + vz * vz;
+        if (!finitef(speed2) || speed2 > kMaxSpeed * kMaxSpeed) {
+            if (!finitef(speed2) || speed2 <= 0.0f) {
+                vx = vy = vz = 0.0f;
+            } else {
+                const float scale = kMaxSpeed / std::sqrt(speed2);
+                vx *= scale;
+                vy *= scale;
+                vz *= scale;
+            }
+        }
+        const std::size_t out = cell * 4u;
+        ctx.compact_state_staging[out + 0] = float_to_half_bits(vx);
+        ctx.compact_state_staging[out + 1] = float_to_half_bits(vy);
+        ctx.compact_state_staging[out + 2] = float_to_half_bits(vz);
+        ctx.compact_state_staging[out + 3] = float_to_half_bits(pressure);
+    }
+
+    const std::size_t solid_bytes = ctx.cells * sizeof(std::uint8_t);
+    const std::size_t state_bytes = ctx.compact_state_staging.size() * sizeof(std::uint16_t);
+    cl_int err = clEnqueueWriteBuffer(
+        g_opencl.queue,
+        ctx.d_compact_solid,
+        CL_TRUE,
+        0,
+        solid_bytes,
+        ctx.compact_solid_cache.data(),
+        0,
+        nullptr,
+        nullptr
+    );
+    if (err != CL_SUCCESS) {
+        g_opencl.error = format_opencl_api_error("clEnqueueWriteBuffer(d_compact_solid)", err);
+        return false;
+    }
+    err = clEnqueueWriteBuffer(
+        g_opencl.queue,
+        ctx.d_compact_state,
+        CL_TRUE,
+        0,
+        state_bytes,
+        ctx.compact_state_staging.data(),
+        0,
+        nullptr,
+        nullptr
+    );
+    if (err != CL_SUCCESS) {
+        g_opencl.error = format_opencl_api_error("clEnqueueWriteBuffer(d_compact_state)", err);
+        return false;
+    }
+    err = clEnqueueWriteBuffer(
+        g_opencl.queue,
+        ctx.d_compact_state_next,
+        CL_TRUE,
+        0,
+        state_bytes,
+        ctx.compact_state_staging.data(),
+        0,
+        nullptr,
+        nullptr
+    );
+    if (err != CL_SUCCESS) {
+        g_opencl.error = format_opencl_api_error("clEnqueueWriteBuffer(d_compact_state_next)", err);
+        return false;
+    }
+
+    ctx.compact_initialized = true;
+    return true;
+}
+
+bool opencl_compact_step(ContextState& ctx, const float* payload, float* out, StepTiming& timing) {
+    auto fail_cl = [&](const char* api, cl_int err) -> bool {
+        g_opencl.error = format_opencl_api_error(api, err);
+        return false;
+    };
+
+    const bool wants_output = out != nullptr;
+    if (!ensure_compact_gpu_buffers(ctx, wants_output)) return false;
+
+    auto upload_begin = Clock::now();
+    if (payload || !ctx.compact_initialized) {
+        if (!upload_compact_initial_state(ctx, payload)) {
+            return false;
+        }
+    }
+    timing.payload_copy_ms += elapsed_ms(upload_begin, Clock::now());
+
+    const int cells_i32 = static_cast<int>(ctx.cells);
+    cl_mem read_buf = (ctx.step_counter % 2 == 0) ? ctx.d_compact_state : ctx.d_compact_state_next;
+    cl_mem write_buf = (ctx.step_counter % 2 == 0) ? ctx.d_compact_state_next : ctx.d_compact_state;
+    const OpenClFaceData inlet = compact_inlet_value();
+    const float viscosity_alpha = compact_viscosity_alpha();
+
+    auto solver_begin = Clock::now();
+    cl_int err = CL_SUCCESS;
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 0, sizeof(cl_mem), &read_buf);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 1, sizeof(cl_mem), &ctx.d_compact_solid);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 2, sizeof(int), &ctx.nx);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 3, sizeof(int), &ctx.ny);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 4, sizeof(int), &ctx.nz);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 5, sizeof(int), &cells_i32);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 6, sizeof(OpenClFaceData), inlet.data());
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 7, sizeof(float), &viscosity_alpha);
+    err |= clSetKernelArg(g_opencl.k_compact_macro_step, 8, sizeof(cl_mem), &write_buf);
+    if (err != CL_SUCCESS) return fail_cl("clSetKernelArg(k_compact_macro_step)", err);
+    err = enqueue_kernel_1d(g_opencl.k_compact_macro_step, cells_i32);
+    if (err != CL_SUCCESS) return fail_cl("clEnqueueNDRangeKernel(k_compact_macro_step)", err);
+
+    if (wants_output) {
+        err = CL_SUCCESS;
+        err |= clSetKernelArg(g_opencl.k_compact_output, 0, sizeof(cl_mem), &write_buf);
+        err |= clSetKernelArg(g_opencl.k_compact_output, 1, sizeof(cl_mem), &ctx.d_compact_solid);
+        err |= clSetKernelArg(g_opencl.k_compact_output, 2, sizeof(int), &g_cfg.output_channels);
+        err |= clSetKernelArg(g_opencl.k_compact_output, 3, sizeof(int), &cells_i32);
+        err |= clSetKernelArg(g_opencl.k_compact_output, 4, sizeof(cl_mem), &ctx.d_compact_output);
+        if (err != CL_SUCCESS) return fail_cl("clSetKernelArg(k_compact_output)", err);
+        err = enqueue_kernel_1d(g_opencl.k_compact_output, cells_i32);
+        if (err != CL_SUCCESS) return fail_cl("clEnqueueNDRangeKernel(k_compact_output)", err);
+    }
+    timing.solver_ms += elapsed_ms(solver_begin, Clock::now());
+
+    auto readback_begin = Clock::now();
+    if (wants_output) {
+        const std::size_t output_bytes = ctx.cells * g_cfg.output_channels * sizeof(float);
+        err = clEnqueueReadBuffer(g_opencl.queue, ctx.d_compact_output, CL_TRUE, 0, output_bytes, out, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) return fail_cl("clEnqueueReadBuffer(d_compact_output)", err);
+    }
+    timing.readback_ms += elapsed_ms(readback_begin, Clock::now());
+
+    ctx.last_force[0] = 0.0f;
+    ctx.last_force[1] = 0.0f;
+    ctx.last_force[2] = 0.0f;
+    ctx.step_counter += 1;
+    return true;
+}
+
 bool opencl_step(
     ContextState& ctx,
     const float* payload,
@@ -4584,6 +5083,12 @@ bool opencl_step(
     float* out,
     StepTiming& timing
 ) {
+    if (compact_realtime_path_enabled(overlay_count)) {
+        (void)overlay_cells;
+        (void)overlay_values;
+        return opencl_compact_step(ctx, payload, out, timing);
+    }
+
     if (!ensure_context_gpu_buffers(ctx)) return false;
 
     auto fail_cl = [&](const char* api, cl_int err) -> bool {
@@ -6151,6 +6656,15 @@ bool run_solver_step(
 
 bool run_solver_cached_step(ContextState& ctx, float* out, StepTiming& timing) {
 #if defined(AERO_LBM_OPENCL)
+    if (g_cfg.opencl_enabled && compact_realtime_path_enabled(0) && ctx.compact_initialized) {
+        if (!opencl_compact_step(ctx, nullptr, out, timing)) {
+            const std::string reason = g_opencl.error.empty() ? "OpenCL compact cached step fail" : g_opencl.error;
+            disable_opencl_runtime(reason);
+            set_last_native_error(reason);
+            return false;
+        }
+        return true;
+    }
     if (!g_cfg.opencl_enabled || !benchmark_opencl_supported()) {
         set_last_native_error("cached solver step requires an OpenCL-capable benchmark path");
         return false;
@@ -6209,7 +6723,11 @@ static jboolean native_init_dims_impl(jint nx, jint ny, jint nz, jint input_chan
     }
     g_cfg.opencl_enabled = initialize_opencl_runtime();
     if (g_cfg.opencl_enabled) {
-        g_cfg.runtime_info = "opencl|cumulant-d3q27+sgs+bouss:" + g_opencl.device_name;
+        std::string compact_suffix;
+#if defined(AERO_LBM_OPENCL)
+        compact_suffix = compact_realtime_env_enabled() ? "+compact-realtime-fp16" : "";
+#endif
+        g_cfg.runtime_info = "opencl|cumulant-d3q27+sgs+bouss" + compact_suffix + ":" + g_opencl.device_name;
     } else {
         g_cfg.runtime_info = "cpu|cumulant-d3q27+sgs+bouss (" + g_opencl.error + ")";
     }
@@ -6246,7 +6764,14 @@ static bool native_step_raw_dims_impl(const float* packet, jint nx, jint ny, jin
     }
     ContextState& ctx = *locked_context.ctx;
     ensure_context_shape(ctx, nx, ny, nz, cells);
-    if (ctx.f.empty() || ctx.f_post.empty() || ctx.cells == 0) allocate_cpu_context(ctx, ctx.nx, ctx.ny, ctx.nz);
+#if defined(AERO_LBM_OPENCL)
+    const bool may_use_compact = g_cfg.opencl_enabled && compact_realtime_path_enabled(0);
+#else
+    const bool may_use_compact = false;
+#endif
+    if (!may_use_compact && (ctx.f.empty() || ctx.f_post.empty() || ctx.cells == 0)) {
+        allocate_cpu_context(ctx, ctx.nx, ctx.ny, ctx.nz);
+    }
 
     const bool ok = run_solver_step(ctx, packet, nullptr, nullptr, 0, output_flow, timing);
     if (!ok && g_last_native_error.empty()) {
@@ -6301,7 +6826,14 @@ static bool native_step_raw_dims_with_sparse_overlays_impl(
     }
     ContextState& ctx = *locked_context.ctx;
     ensure_context_shape(ctx, nx, ny, nz, cells);
-    if (ctx.f.empty() || ctx.f_post.empty() || ctx.cells == 0) allocate_cpu_context(ctx, ctx.nx, ctx.ny, ctx.nz);
+#if defined(AERO_LBM_OPENCL)
+    const bool may_use_compact = g_cfg.opencl_enabled && compact_realtime_path_enabled(overlay_count);
+#else
+    const bool may_use_compact = false;
+#endif
+    if (!may_use_compact && (ctx.f.empty() || ctx.f_post.empty() || ctx.cells == 0)) {
+        allocate_cpu_context(ctx, ctx.nx, ctx.ny, ctx.nz);
+    }
 
     const bool ok = run_solver_step(ctx, packet, overlay_cells, overlay_values, overlay_count, output_flow, timing);
     if (!ok && g_last_native_error.empty()) {

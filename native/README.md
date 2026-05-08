@@ -35,6 +35,11 @@ Current native code includes:
   - kernels: `init_distributions`, `stream_collide_step`, `output_macro`
   - per-window GPU buffers keyed by `contextKey`
   - cumulant + SGS + thermal scalar + Boussinesq force
+- OpenCL compact realtime path for the wind-tunnel C API (`benchmark preset none`):
+  - stores `vx/vy/vz/pressure` as packed fp16 macro state with fp32 math in the kernel
+  - keeps only two half4 state buffers plus a byte solid mask resident on the device
+  - avoids the full D3Q27 distribution buffers and full payload buffer for `aero_solver_advance_wind_tunnel`
+  - expected `128^3` resident device memory is about 34 MiB without readback and about 66 MiB with full-field output
 - CPU reference `D3Q27` path (automatic fallback):
   - per-window context state (`contextKey`)
   - cumulant + SGS + thermal scalar + Boussinesq force
@@ -170,6 +175,12 @@ To force CPU fallback even when OpenCL exists:
 
 ```bash
 export AERO_LBM_CPU_ONLY=1
+```
+
+To force the high-fidelity D3Q27 OpenCL path for wind-tunnel benchmarks instead of the compact realtime path:
+
+```bash
+export AERO_LBM_COMPACT_REALTIME=0
 ```
 
 To build native without OpenCL support (not default):
