@@ -147,7 +147,15 @@ struct FluidWorldRuntime {
     int brick_size = 0;
     float dx_meters = 1.0f;
     float dt_seconds = 0.05f;
+    bool exact_active_hints = false;
     std::uint64_t epoch = 0;
+    std::uint64_t compact_cached_attempts = 0;
+    std::uint64_t compact_cached_steps = 0;
+    std::uint64_t compact_cached_failures = 0;
+    std::uint64_t compact_initial_steps = 0;
+    std::uint64_t d3q27_steps = 0;
+    std::uint64_t packet_build_steps = 0;
+    std::uint64_t dynamic_upload_resets = 0;
     std::unordered_map<BrickCoord, BrickData, BrickCoordHash> bricks;
     std::unordered_set<BrickCoord, BrickCoordHash> active_hint_closure;
     std::vector<AeroLbmWorldDelta> pending_world_deltas;
@@ -334,6 +342,16 @@ bool simulation_compact_enabled() {
     return env_flag_enabled("AERO_LBM_SIMULATION_COMPACT", false);
 }
 
+bool brick_world_compact_enabled() {
+    if (std::getenv("AERO_LBM_BRICK_WORLD_COMPACT")) {
+        return env_flag_enabled("AERO_LBM_BRICK_WORLD_COMPACT", true);
+    }
+    if (std::getenv("AERO_LBM_SIMULATION_COMPACT")) {
+        return simulation_compact_enabled();
+    }
+    return true;
+}
+
 AeroLbmBoundaryFaceConfig simulation_compact_face(int hydro_kind, int thermal_kind) {
     AeroLbmBoundaryFaceConfig face{};
     face.hydrodynamic_kind = hydro_kind;
@@ -516,7 +534,7 @@ bool brick_is_solver_active(const FluidWorldRuntime& runtime, const BrickData& b
 bool brick_dynamic_region_valid(const FluidWorldRuntime& runtime, const DynamicRegionData* dynamic);
 
 bool brick_compact_cached_ready(const FluidWorldRuntime& runtime, const BrickData& brick) {
-    return simulation_compact_enabled()
+    return brick_world_compact_enabled()
         && brick.compact_context_active
         && brick.context_key != 0
         && !brick.forcing_dirty
@@ -579,6 +597,36 @@ int count_context_bricks(const FluidWorldRuntime& runtime) {
     int count = 0;
     for (const auto& entry : runtime.bricks) {
         if (entry.second.context_key != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int count_compact_context_bricks(const FluidWorldRuntime& runtime) {
+    int count = 0;
+    for (const auto& entry : runtime.bricks) {
+        if (entry.second.compact_context_active && entry.second.context_key != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int count_compact_ready_bricks(const FluidWorldRuntime& runtime) {
+    int count = 0;
+    for (const auto& entry : runtime.bricks) {
+        if (brick_compact_cached_ready(runtime, entry.second)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int count_stale_dynamic_bricks(const FluidWorldRuntime& runtime) {
+    int count = 0;
+    for (const auto& entry : runtime.bricks) {
+        if (entry.second.dynamic_region_stale) {
             ++count;
         }
     }
@@ -719,10 +767,12 @@ BrickCoord brick_coord_for_block(int x, int y, int z, int brick_size) {
 void recompute_runtime_active_flags(FluidWorldRuntime& runtime) {
     for (auto& entry : runtime.bricks) {
         const bool hinted = runtime.active_hint_closure.find(entry.first) != runtime.active_hint_closure.end();
-        entry.second.active = (hinted && brick_has_solver_static(runtime, entry.second))
-            || entry.second.geometry_dirty
-            || entry.second.forcing_dirty
-            || entry.second.pending_reinit;
+        entry.second.active = runtime.exact_active_hints
+            ? (hinted && brick_has_solver_static(runtime, entry.second))
+            : ((hinted && brick_has_solver_static(runtime, entry.second))
+                || entry.second.geometry_dirty
+                || entry.second.forcing_dirty
+                || entry.second.pending_reinit);
         if (entry.second.active) {
             entry.second.last_active_epoch = runtime.epoch;
         }
@@ -745,6 +795,13 @@ void release_brick_context(BrickData& brick) {
 void prune_inactive_bricks(FluidWorldRuntime& runtime) {
     for (auto iterator = runtime.bricks.begin(); iterator != runtime.bricks.end();) {
         const BrickData& brick = iterator->second;
+        const bool outside_exact_set = runtime.exact_active_hints
+            && runtime.active_hint_closure.find(iterator->first) == runtime.active_hint_closure.end();
+        if (outside_exact_set) {
+            release_brick_context(iterator->second);
+            iterator = runtime.bricks.erase(iterator);
+            continue;
+        }
         const bool stale = !brick.active
             && !brick.geometry_dirty
             && !brick.forcing_dirty
@@ -1388,13 +1445,15 @@ bool sync_brick_dynamic_from_context(const FluidWorldRuntime& runtime, BrickData
     return true;
 }
 
-bool step_brick_compact_cached(BrickData& brick, int size) {
-    if (!simulation_compact_enabled()
+bool step_brick_compact_cached(FluidWorldRuntime& runtime, BrickData& brick, int size) {
+    runtime.compact_cached_attempts++;
+    if (!brick_world_compact_enabled()
         || !brick.compact_context_active
         || brick.context_key == 0
         || brick.forcing_dirty
         || brick.geometry_dirty
         || brick.pending_reinit) {
+        runtime.compact_cached_failures++;
         return false;
     }
     bool step_ok = false;
@@ -1404,6 +1463,9 @@ bool step_brick_compact_cached(BrickData& brick, int size) {
     aero_lbm_benchmark_reset_config();
     if (step_ok) {
         brick.dynamic_region_stale = true;
+        runtime.compact_cached_steps++;
+    } else {
+        runtime.compact_cached_failures++;
     }
     return step_ok;
 }
@@ -1420,9 +1482,10 @@ bool step_brick_actual(
         zero_output_fallback = std::make_shared<DynamicRegionData>(dynamic);
     }
     const int size = runtime.brick_size;
-    if (!zero_output_fallback && step_brick_compact_cached(brick, size)) {
+    if (!zero_output_fallback && step_brick_compact_cached(runtime, brick, size)) {
         return true;
     }
+    runtime.packet_build_steps++;
     if (!build_brick_step_packet(runtime, coord, brick, dynamic, brick.packet_cache)) {
         return false;
     }
@@ -1432,7 +1495,7 @@ bool step_brick_actual(
     }
     bool step_ok = false;
     bool compact_step_ok = false;
-    if (simulation_compact_enabled()) {
+    if (brick_world_compact_enabled()) {
         const CompactBrickPacketSummary compact_summary = summarize_compact_brick_packet(brick.packet_cache);
         if (compact_summary.supported
             && configure_simulation_compact_boundary(compact_summary.vx, compact_summary.vy, compact_summary.vz, size, size, size)) {
@@ -1444,6 +1507,7 @@ bool step_brick_actual(
             }
             if (step_ok) {
                 compact_step_ok = true;
+                runtime.compact_initial_steps++;
                 brick.compact_context_active = true;
                 brick.compact_vx = compact_summary.vx;
                 brick.compact_vy = compact_summary.vy;
@@ -1455,6 +1519,7 @@ bool step_brick_actual(
     }
     if (!step_ok) {
         brick.compact_context_active = false;
+        runtime.d3q27_steps++;
         step_ok = aero_lbm_step_rect(brick.packet_cache.data(), size, size, size, brick.context_key, nullptr) != 0;
     }
     if (!step_ok) {
@@ -3542,6 +3607,7 @@ static int set_brick_world_active_hints_locked(
         set_simulation_last_error(std::string(error_prefix) + ": brick size mismatch");
         return 0;
     }
+    runtime.exact_active_hints = !include_neighbor_closure;
     for (auto& entry : runtime.bricks) {
         entry.second.active_hint = false;
     }
@@ -4253,6 +4319,7 @@ AERO_LBM_CAPI_EXPORT int aero_lbm_simulation_upload_brick_world_dynamic_brick(
     BrickData& brick = runtime.bricks[BrickCoord{brick_x, brick_y, brick_z}];
     if (brick.context_key != 0) {
         release_brick_context(brick);
+        runtime.dynamic_upload_resets++;
     }
     brick.dynamic_region = std::move(dynamic);
     brick.compact_context_active = false;
@@ -5666,6 +5733,17 @@ AERO_LBM_CAPI_EXPORT const char* aero_lbm_simulation_runtime_info(void) {
     size_t static_brick_count = 0;
     size_t dynamic_brick_count = 0;
     size_t context_brick_count = 0;
+    size_t compact_context_brick_count = 0;
+    size_t compact_ready_brick_count = 0;
+    size_t stale_dynamic_brick_count = 0;
+    size_t exact_hint_world_count = 0;
+    std::uint64_t compact_cached_attempts = 0;
+    std::uint64_t compact_cached_steps = 0;
+    std::uint64_t compact_cached_failures = 0;
+    std::uint64_t compact_initial_steps = 0;
+    std::uint64_t d3q27_steps = 0;
+    std::uint64_t packet_build_steps = 0;
+    std::uint64_t dynamic_upload_resets = 0;
     std::uint64_t max_brick_epoch = 0;
     if (g_service) {
         for (const auto& region : g_service->regions) {
@@ -5684,11 +5762,23 @@ AERO_LBM_CAPI_EXPORT const char* aero_lbm_simulation_runtime_info(void) {
             static_brick_count += static_cast<size_t>(count_static_bricks(entry.second));
             dynamic_brick_count += static_cast<size_t>(count_dynamic_bricks(entry.second));
             context_brick_count += static_cast<size_t>(count_context_bricks(entry.second));
+            compact_context_brick_count += static_cast<size_t>(count_compact_context_bricks(entry.second));
+            compact_ready_brick_count += static_cast<size_t>(count_compact_ready_bricks(entry.second));
+            stale_dynamic_brick_count += static_cast<size_t>(count_stale_dynamic_bricks(entry.second));
+            exact_hint_world_count += entry.second.exact_active_hints ? 1u : 0u;
+            compact_cached_attempts += entry.second.compact_cached_attempts;
+            compact_cached_steps += entry.second.compact_cached_steps;
+            compact_cached_failures += entry.second.compact_cached_failures;
+            compact_initial_steps += entry.second.compact_initial_steps;
+            d3q27_steps += entry.second.d3q27_steps;
+            packet_build_steps += entry.second.packet_build_steps;
+            dynamic_upload_resets += entry.second.dynamic_upload_resets;
             max_brick_epoch = std::max(max_brick_epoch, entry.second.epoch);
         }
     }
     text = "simulation_bridge|services=" + std::to_string(g_service ? 1 : 0)
         + "|compact_experimental=" + std::string(simulation_compact_enabled() ? "on" : "off")
+        + "|brick_world_compact=" + std::string(brick_world_compact_enabled() ? "on" : "off")
         + "|active_regions=" + std::to_string(active_region_count)
         + "|static_regions=" + std::to_string(static_region_count)
         + "|dynamic_regions=" + std::to_string(dynamic_region_count)
@@ -5700,6 +5790,17 @@ AERO_LBM_CAPI_EXPORT const char* aero_lbm_simulation_runtime_info(void) {
         + "|static_bricks=" + std::to_string(static_brick_count)
         + "|dynamic_bricks=" + std::to_string(dynamic_brick_count)
         + "|context_bricks=" + std::to_string(context_brick_count)
+        + "|compact_context_bricks=" + std::to_string(compact_context_brick_count)
+        + "|compact_ready_bricks=" + std::to_string(compact_ready_brick_count)
+        + "|stale_dynamic_bricks=" + std::to_string(stale_dynamic_brick_count)
+        + "|exact_hint_worlds=" + std::to_string(exact_hint_world_count)
+        + "|compact_cached_attempts=" + std::to_string(compact_cached_attempts)
+        + "|compact_cached_steps=" + std::to_string(compact_cached_steps)
+        + "|compact_cached_failures=" + std::to_string(compact_cached_failures)
+        + "|compact_initial_steps=" + std::to_string(compact_initial_steps)
+        + "|d3q27_steps=" + std::to_string(d3q27_steps)
+        + "|packet_build_steps=" + std::to_string(packet_build_steps)
+        + "|dynamic_upload_resets=" + std::to_string(dynamic_upload_resets)
         + "|brick_epoch_max=" + std::to_string(max_brick_epoch);
     return text.c_str();
 }

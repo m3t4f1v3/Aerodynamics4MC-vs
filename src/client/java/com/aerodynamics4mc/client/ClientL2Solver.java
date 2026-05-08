@@ -1519,6 +1519,7 @@ final class ClientL2Solver {
         private final float[] workerSurfaceTemperature = new float[CELL_COUNT];
         private volatile boolean running;
         private volatile String lastError = "-";
+        private volatile String lastRuntimeInfo = "-";
         private volatile NativeSimulationBridge.BrickWorldRuntimeStatus lastNativeStatus;
         private volatile long processedCommands;
         private volatile long droppedCommands;
@@ -1588,6 +1589,7 @@ final class ClientL2Solver {
                 + ",lastStepMs=" + formatMillis(lastStepNanos)
                 + ",lastPublishMs=" + formatMillis(lastPublishNanos)
                 + ",native=" + formatNativeStatus(lastNativeStatus)
+                + ",runtime=" + lastRuntimeInfo
                 + ",error=" + lastError;
         }
 
@@ -1652,6 +1654,7 @@ final class ClientL2Solver {
             releaseService();
             atlases.clear();
             lastNativeStatus = null;
+            lastRuntimeInfo = "-";
             lastError = "-";
         }
 
@@ -1884,7 +1887,13 @@ final class ClientL2Solver {
         }
 
         private void updateNativeStatus(long worldKey) {
-            lastNativeStatus = serviceKey == 0L ? null : bridge.getBrickWorldRuntimeStatus(serviceKey, worldKey);
+            if (serviceKey == 0L) {
+                lastNativeStatus = null;
+                lastRuntimeInfo = "-";
+                return;
+            }
+            lastNativeStatus = bridge.getBrickWorldRuntimeStatus(serviceKey, worldKey);
+            lastRuntimeInfo = bridge.runtimeInfo();
         }
 
         private void releaseService() {
