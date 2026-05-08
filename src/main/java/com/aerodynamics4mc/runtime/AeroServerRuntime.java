@@ -470,6 +470,10 @@ public final class AeroServerRuntime {
         return player != null && clientLocalL2Players.contains(player.getUuid());
     }
 
+    private boolean shouldRunServerAuthoritativeL2() {
+        return SERVER_AUTHORITATIVE_L2_ENABLED;
+    }
+
     public static AeroWindSample sampleWind(ServerWorld world, Vec3d position) {
         return sampleFlow(world, position);
     }
@@ -610,6 +614,9 @@ public final class AeroServerRuntime {
 
     private void onChunkLoad(ServerWorld world, WorldChunk chunk) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_CHUNK_LOAD, () -> {
+            if (!shouldRunServerAuthoritativeL2()) {
+                return;
+            }
             worldMirror.onChunkLoad(world, chunk);
             if (isRuntimeChunkTracked(world.getRegistryKey(), chunk.getPos())) {
                 submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
@@ -633,6 +640,9 @@ public final class AeroServerRuntime {
 
     private void onChunkUnload(ServerWorld world, WorldChunk chunk) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_CHUNK_UNLOAD, () -> {
+            if (!shouldRunServerAuthoritativeL2()) {
+                return;
+            }
             worldMirror.onChunkUnload(world, chunk.getPos());
             if (isRuntimeChunkTracked(world.getRegistryKey(), chunk.getPos())) {
                 submitWorldDeltaToSimulation(new NativeSimulationBridge.WorldDelta(
@@ -687,6 +697,9 @@ public final class AeroServerRuntime {
 
     private void onBlockEntityLoad(BlockEntity blockEntity, ServerWorld world) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_ENTITY_LOAD, () -> {
+            if (!shouldRunServerAuthoritativeL2()) {
+                return;
+            }
             worldMirror.onBlockEntityLoad(blockEntity, world);
             BlockPos pos = blockEntity.getPos();
             if (!isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
@@ -711,6 +724,9 @@ public final class AeroServerRuntime {
 
     private void onBlockEntityUnload(BlockEntity blockEntity, ServerWorld world) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_ENTITY_UNLOAD, () -> {
+            if (!shouldRunServerAuthoritativeL2()) {
+                return;
+            }
             worldMirror.onBlockEntityUnload(blockEntity, world);
             BlockPos pos = blockEntity.getPos();
             if (!isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
@@ -768,6 +784,9 @@ public final class AeroServerRuntime {
 
     private void onBlockChanged(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
         runMainThreadCallbackProfiledUnlocked(CALLBACK_PHASE_BLOCK_CHANGED, () -> {
+            if (!shouldRunServerAuthoritativeL2()) {
+                return;
+            }
             worldMirror.onBlockChanged(world, pos, oldState, newState);
             invalidateDynamicRegionsForBlock(world, pos);
             if (isRuntimeBlockTracked(world.getRegistryKey(), pos)) {
@@ -963,8 +982,6 @@ public final class AeroServerRuntime {
                     feedback(
                         ctx.getSource(),
                         "Status streaming=" + streamingEnabled
-                            + " renderVectors=" + renderVelocityVectorsEnabled
-                            + " renderStreamlines=" + renderStreamlinesEnabled
                             + " box=" + format2(DOMAIN_SIZE_METERS) + "m"
                             + " n=" + GRID_SIZE
                             + " dx=" + format4(CELL_SIZE_METERS) + "m"
@@ -1041,21 +1058,6 @@ public final class AeroServerRuntime {
                     sendNestedFeedbackStatus(ctx.getSource());
                     return 1;
                 }))
-            .then(CommandManager.literal("render")
-                .executes(ctx -> renderStatus(ctx.getSource()))
-                .then(CommandManager.literal("vectors")
-                    .then(CommandManager.literal("on")
-                        .executes(ctx -> setRenderVelocityVectors(ctx.getSource(), true)))
-                    .then(CommandManager.literal("off")
-                        .executes(ctx -> setRenderVelocityVectors(ctx.getSource(), false)))
-                )
-                .then(CommandManager.literal("streamlines")
-                    .then(CommandManager.literal("on")
-                        .executes(ctx -> setRenderStreamlines(ctx.getSource(), true)))
-                    .then(CommandManager.literal("off")
-                        .executes(ctx -> setRenderStreamlines(ctx.getSource(), false)))
-                )
-            )
             .then(CommandManager.literal("dumpdata")
                 .executes(ctx -> dumpRuntimeData(ctx.getSource()))
                 )
@@ -2815,7 +2817,9 @@ public final class AeroServerRuntime {
             return;
         }
         long phaseStartNanos = System.nanoTime();
-        ensureSimulationServiceInitialized();
+        if (shouldRunServerAuthoritativeL2()) {
+            ensureSimulationServiceInitialized();
+        }
         recordMainThreadPhase(MAIN_THREAD_PHASE_SERVICE_INIT, System.nanoTime() - phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         updateSimulationFocus(server);
@@ -4850,6 +4854,12 @@ public final class AeroServerRuntime {
     }
 
     private void syncBrickRuntimeHints(Map<RegistryKey<World>, int[]> hintCoordsByWorld) {
+        if (!shouldRunServerAuthoritativeL2()) {
+            brickRuntimeHintWorldKeys.clear();
+            brickRuntimeKnownWorldKeys.clear();
+            brickBoundaryReferenceRefreshTicks.clear();
+            return;
+        }
         if (simulationServiceId == 0L || !simulationBridge.isLoaded()) {
             return;
         }
@@ -5027,6 +5037,11 @@ public final class AeroServerRuntime {
     }
 
     private void stepBrickRuntimeWorlds() {
+        if (!shouldRunServerAuthoritativeL2()) {
+            brickRuntimeHintWorldKeys.clear();
+            brickRuntimeKnownWorldKeys.clear();
+            return;
+        }
         if (simulationServiceId == 0L || !simulationBridge.isLoaded()) {
             return;
         }
@@ -7631,6 +7646,9 @@ public final class AeroServerRuntime {
         int brickY,
         int brickZ
     ) {
+        if (!shouldRunServerAuthoritativeL2()) {
+            return null;
+        }
         if (simulationServiceId == 0L || !simulationBridge.isLoaded()) {
             return null;
         }
@@ -7994,7 +8012,7 @@ public final class AeroServerRuntime {
     }
 
     private float publishBrickSolveAtlases(Set<WindowKey> solveWindowKeys) {
-        if (solveWindowKeys.isEmpty()) {
+        if (!shouldRunServerAuthoritativeL2() || solveWindowKeys.isEmpty()) {
             publishedFrame.set(null);
             lastPublishedFrameTick = Integer.MIN_VALUE;
             lastCoordinatorPublishedMaxSpeed = 0.0f;

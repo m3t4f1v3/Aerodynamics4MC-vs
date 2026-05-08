@@ -11,8 +11,10 @@ import com.aerodynamics4mc.net.AeroRuntimeStatePayload;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.block.BlockState;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
@@ -35,6 +37,7 @@ public final class AeroClientMod implements ClientModInitializer {
         irisWindBridge.initialize();
         clientL2Solver.initialize();
         registerClientCommands();
+        registerClientCommandInterceptor();
     }
 
     public static AeroWindSample sampleFlow(ClientWorld world, Vec3d position) {
@@ -98,16 +101,83 @@ public final class AeroClientMod implements ClientModInitializer {
     }
 
     private void registerClientCommands() {
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
-            ClientCommandManager.literal("aero_client_l2")
-                .executes(ctx -> clientL2Status(ctx.getSource()))
-                .then(ClientCommandManager.literal("status")
-                    .executes(ctx -> clientL2Status(ctx.getSource())))
-                .then(ClientCommandManager.literal("on")
-                    .executes(ctx -> setClientL2Experimental(ctx.getSource(), true)))
-                .then(ClientCommandManager.literal("off")
-                    .executes(ctx -> setClientL2Experimental(ctx.getSource(), false)))
-        ));
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(
+                ClientCommandManager.literal("aero_client_l2")
+                    .executes(ctx -> clientL2Status(ctx.getSource()))
+                    .then(ClientCommandManager.literal("status")
+                        .executes(ctx -> clientL2Status(ctx.getSource())))
+                    .then(ClientCommandManager.literal("on")
+                        .executes(ctx -> setClientL2Experimental(ctx.getSource(), true)))
+                    .then(ClientCommandManager.literal("off")
+                        .executes(ctx -> setClientL2Experimental(ctx.getSource(), false)))
+            );
+            dispatcher.register(
+                ClientCommandManager.literal("aero")
+                    .then(ClientCommandManager.literal("render")
+                        .executes(ctx -> renderStatus(ctx.getSource()))
+                        .then(ClientCommandManager.literal("vectors")
+                            .then(ClientCommandManager.literal("on")
+                                .executes(ctx -> setRenderVelocityVectors(ctx.getSource(), true)))
+                            .then(ClientCommandManager.literal("off")
+                                .executes(ctx -> setRenderVelocityVectors(ctx.getSource(), false))))
+                        .then(ClientCommandManager.literal("streamlines")
+                            .then(ClientCommandManager.literal("on")
+                                .executes(ctx -> setRenderStreamlines(ctx.getSource(), true)))
+                            .then(ClientCommandManager.literal("off")
+                                .executes(ctx -> setRenderStreamlines(ctx.getSource(), false)))))
+            );
+        });
+    }
+
+    private void registerClientCommandInterceptor() {
+        ClientSendMessageEvents.ALLOW_COMMAND.register(command -> {
+            String normalized = command == null ? "" : command.trim().replaceAll("\\s+", " ");
+            if (!normalized.equals("aero render") && !normalized.startsWith("aero render ")) {
+                return true;
+            }
+            handleRenderCommand(normalized);
+            return false;
+        });
+    }
+
+    private void handleRenderCommand(String command) {
+        String[] parts = command.split(" ");
+        if (parts.length == 2) {
+            sendClientFeedback(renderStatusText());
+            return;
+        }
+        if (parts.length != 4) {
+            sendClientFeedback(Text.literal("Usage: /aero render <vectors|streamlines> <on|off>"));
+            return;
+        }
+        boolean enabled;
+        if ("on".equals(parts[3])) {
+            enabled = true;
+        } else if ("off".equals(parts[3])) {
+            enabled = false;
+        } else {
+            sendClientFeedback(Text.literal("Usage: /aero render <vectors|streamlines> <on|off>"));
+            return;
+        }
+        switch (parts[2]) {
+            case "vectors" -> {
+                visualizer.setRenderVelocityVectors(enabled);
+                sendClientFeedback(Text.literal("Render vectors " + (enabled ? "enabled" : "disabled")));
+            }
+            case "streamlines" -> {
+                visualizer.setRenderStreamlines(enabled);
+                sendClientFeedback(Text.literal("Render streamlines " + (enabled ? "enabled" : "disabled")));
+            }
+            default -> sendClientFeedback(Text.literal("Usage: /aero render <vectors|streamlines> <on|off>"));
+        }
+    }
+
+    private void sendClientFeedback(Text message) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.sendMessage(message, false);
+        }
     }
 
     private int clientL2Status(net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource source) {
@@ -125,6 +195,36 @@ public final class AeroClientMod implements ClientModInitializer {
         }
         sendClientL2Preference(enabled);
         source.sendFeedback(Text.literal("Client L2 local solve " + (enabled ? "enabled" : "disabled")));
+        return 1;
+    }
+
+    private int renderStatus(net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource source) {
+        source.sendFeedback(renderStatusText());
+        return 1;
+    }
+
+    private Text renderStatusText() {
+        return Text.literal(
+            "Render vectors=" + visualizer.renderVelocityVectorsEnabled()
+                + " streamlines=" + visualizer.renderStreamlinesEnabled()
+        );
+    }
+
+    private int setRenderVelocityVectors(
+        net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource source,
+        boolean enabled
+    ) {
+        visualizer.setRenderVelocityVectors(enabled);
+        source.sendFeedback(Text.literal("Render vectors " + (enabled ? "enabled" : "disabled")));
+        return 1;
+    }
+
+    private int setRenderStreamlines(
+        net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource source,
+        boolean enabled
+    ) {
+        visualizer.setRenderStreamlines(enabled);
+        source.sendFeedback(Text.literal("Render streamlines " + (enabled ? "enabled" : "disabled")));
         return 1;
     }
 

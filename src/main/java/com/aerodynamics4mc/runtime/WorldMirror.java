@@ -10,7 +10,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import com.aerodynamics4mc.FanBlock;
 import com.aerodynamics4mc.FanBlockEntity;
@@ -152,13 +151,12 @@ final class WorldMirror {
     private final Set<FanRefreshRequest> queuedFanRefreshes = new HashSet<>();
 
     synchronized void close() {
-        loadExecutor.shutdown();
-        try {
-            loadExecutor.awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-        }
-        staticStore.close();
+        dimensions.clear();
+        pendingHighPriorityLiveBuilds.clear();
+        pendingLowPriorityLiveBuilds.clear();
+        queuedLiveBuilds.clear();
+        pendingFanRefreshes.clear();
+        queuedFanRefreshes.clear();
     }
 
     synchronized void onWorldUnload(ServerWorld world) {

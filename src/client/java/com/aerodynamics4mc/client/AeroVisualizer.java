@@ -80,8 +80,6 @@ final class AeroVisualizer {
 
     void onRuntimeState(AeroFlowState state) {
         streamingEnabled = state.streamingEnabled();
-        renderVelocityVectors = state.renderVelocityVectors();
-        renderStreamlines = state.renderStreamlines();
         if (!streamingEnabled) {
             remoteWindows.clear();
             localWindows.clear();
@@ -159,8 +157,22 @@ final class AeroVisualizer {
         coarseWindFields.clear();
         analysisWindows.clear();
         streamingEnabled = false;
-        renderVelocityVectors = true;
-        renderStreamlines = true;
+    }
+
+    void setRenderVelocityVectors(boolean enabled) {
+        renderVelocityVectors = enabled;
+    }
+
+    void setRenderStreamlines(boolean enabled) {
+        renderStreamlines = enabled;
+    }
+
+    boolean renderVelocityVectorsEnabled() {
+        return renderVelocityVectors;
+    }
+
+    boolean renderStreamlinesEnabled() {
+        return renderStreamlines;
     }
 
     AeroWindSample sampleFlow(Identifier dimensionId, Vec3d position) {

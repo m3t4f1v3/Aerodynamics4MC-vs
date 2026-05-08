@@ -144,19 +144,19 @@ final class IrisWindBridge {
         lastAnchorZ = anchorZ;
         lastUploadTick = client.world.getTime();
         dirty = false;
-        if (lastDiagnosticTick == Long.MIN_VALUE || client.world.getTime() - lastDiagnosticTick >= 100) {
-            LOGGER.info(
-                "Iris wind refresh: streaming={} nonZeroCells={} maxSpeed={} meanSpeed={} origin=({}, {}, {})",
-                streamingEnabled,
-                stats.nonZeroCells(),
-                String.format("%.3f", stats.maxSpeed()),
-                String.format("%.3f", stats.meanSpeed()),
-                anchorX,
-                anchorY,
-                anchorZ
-            );
-            lastDiagnosticTick = client.world.getTime();
-        }
+        // if (lastDiagnosticTick == Long.MIN_VALUE || client.world.getTime() - lastDiagnosticTick >= 100) {
+        //     LOGGER.info(
+        //         "Iris wind refresh: streaming={} nonZeroCells={} maxSpeed={} meanSpeed={} origin=({}, {}, {})",
+        //         streamingEnabled,
+        //         stats.nonZeroCells(),
+        //         String.format("%.3f", stats.maxSpeed()),
+        //         String.format("%.3f", stats.meanSpeed()),
+        //         anchorX,
+        //         anchorY,
+        //         anchorZ
+        //     );
+        //     lastDiagnosticTick = client.world.getTime();
+        // }
     }
 
     private void onRenderFrame(WorldTerrainRenderContext context) {
