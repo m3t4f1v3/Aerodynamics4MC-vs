@@ -1527,7 +1527,7 @@ bool step_brick_actual(
             if (!step_ok) {
                 step_ok = aero_lbm_step_rect(brick.packet_cache.data(), size, size, size, brick.context_key, nullptr) != 0;
             }
-            if (step_ok && aero_lbm_context_compact_initialized(brick.context_key)) {
+            if (step_ok && aero_lbm_context_realtime_cached_initialized(brick.context_key)) {
                 compact_step_ok = true;
                 runtime.compact_initial_steps++;
                 if (compact_summary.thermal_cells > 0) {
