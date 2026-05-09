@@ -1,83 +1,59 @@
 package com.aerodynamics4mc;
 
-import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
-import net.minecraft.block.Block;
-import net.minecraft.block.entity.BlockEntityType;
-import net.minecraft.item.BlockItem;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemGroups;
-import net.minecraft.registry.Registries;
-import net.minecraft.registry.Registry;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.util.Identifier;
-import net.fabricmc.fabric.api.object.builder.v1.block.entity.FabricBlockEntityTypeBuilder;
+import net.minecraftforge.registries.DeferredRegister;
+import net.minecraftforge.registries.RegistryObject;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
 public final class ModBlocks {
     public static final String MOD_ID = "aerodynamics4mc";
-    public static final Identifier FAN_ID = Identifier.of(MOD_ID, "fan");
-    public static final Identifier DUCT_ID = Identifier.of(MOD_ID, "duct");
-    public static final Identifier WIND_METER_ID = Identifier.of(MOD_ID, "wind_meter");
-    public static final Identifier WIND_TURBINE_PROBE_ID = Identifier.of(MOD_ID, "wind_turbine_probe");
-    public static Block FAN_BLOCK;
-    public static Item FAN_ITEM;
-    public static Block DUCT_BLOCK;
-    public static Item DUCT_ITEM;
-    public static Item WIND_METER_ITEM;
-    public static Block WIND_TURBINE_PROBE_BLOCK;
-    public static Item WIND_TURBINE_PROBE_ITEM;
-    public static BlockEntityType<FanBlockEntity> FAN_BLOCK_ENTITY;
-    public static BlockEntityType<WindTurbineProbeBlockEntity> WIND_TURBINE_PROBE_BLOCK_ENTITY;
+
+    // Create deferred registries
+    public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, MOD_ID);
+    public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(Registries.ITEM, MOD_ID);
+    public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, MOD_ID);
+
+    // Fan block and item
+    public static final RegistryObject<Block> FAN_BLOCK = BLOCKS.register("fan",
+        () -> new FanBlock(BlockBehaviour.Properties.of().strength(1.5f))
+    );
+    public static final RegistryObject<Item> FAN_ITEM = ITEMS.register("fan",
+        () -> new BlockItem(FAN_BLOCK.get(), new Item.Properties())
+    );
+
+    // Duct block and item
+    public static final RegistryObject<Block> DUCT_BLOCK = BLOCKS.register("duct",
+        () -> new DuctBlock(BlockBehaviour.Properties.of().strength(1.0f))
+    );
+    public static final RegistryObject<Item> DUCT_ITEM = ITEMS.register("duct",
+        () -> new BlockItem(DUCT_BLOCK.get(), new Item.Properties())
+    );
+
+    // Wind meter item
+    public static final RegistryObject<Item> WIND_METER_ITEM = ITEMS.register("wind_meter",
+        () -> new WindMeterItem(new Item.Properties().stacksTo(1))
+    );
+
+    // Wind turbine probe block and item
+    public static final RegistryObject<Block> WIND_TURBINE_PROBE_BLOCK = BLOCKS.register("wind_turbine_probe",
+        () -> new WindTurbineProbeBlock(BlockBehaviour.Properties.of().strength(1.5f))
+    );
+    public static final RegistryObject<Item> WIND_TURBINE_PROBE_ITEM = ITEMS.register("wind_turbine_probe",
+        () -> new BlockItem(WIND_TURBINE_PROBE_BLOCK.get(), new Item.Properties())
+    );
+
+    // Block entities
+    public static final RegistryObject<BlockEntityType<FanBlockEntity>> FAN_BLOCK_ENTITY = BLOCK_ENTITIES.register("fan",
+        () -> BlockEntityType.Builder.of(FanBlockEntity::new, FAN_BLOCK.get()).build(null)
+    );
+    public static final RegistryObject<BlockEntityType<WindTurbineProbeBlockEntity>> WIND_TURBINE_PROBE_BLOCK_ENTITY = BLOCK_ENTITIES.register("wind_turbine_probe",
+        () -> BlockEntityType.Builder.of(WindTurbineProbeBlockEntity::new, WIND_TURBINE_PROBE_BLOCK.get()).build(null)
+    );
 
     private ModBlocks() {
-    }
-
-    public static void register() {
-        RegistryKey<Block> key = RegistryKey.of(RegistryKeys.BLOCK, FAN_ID);
-        FAN_BLOCK = new FanBlock(Block.Settings.create().registryKey(key).strength(1.5f));
-        Registry.register(Registries.BLOCK, FAN_ID, FAN_BLOCK);
-        FAN_ITEM = Registry.register(
-            Registries.ITEM,
-            FAN_ID,
-            new BlockItem(FAN_BLOCK, new Item.Settings().registryKey(RegistryKey.of(RegistryKeys.ITEM, FAN_ID)))
-        );
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(FAN_ITEM));
-        RegistryKey<Block> ductKey = RegistryKey.of(RegistryKeys.BLOCK, DUCT_ID);
-        DUCT_BLOCK = new DuctBlock(Block.Settings.create().registryKey(ductKey).strength(1.0f));
-        Registry.register(Registries.BLOCK, DUCT_ID, DUCT_BLOCK);
-        DUCT_ITEM = Registry.register(
-            Registries.ITEM,
-            DUCT_ID,
-            new BlockItem(DUCT_BLOCK, new Item.Settings().registryKey(RegistryKey.of(RegistryKeys.ITEM, DUCT_ID)))
-        );
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(DUCT_ITEM));
-        WIND_METER_ITEM = Registry.register(
-            Registries.ITEM,
-            WIND_METER_ID,
-            new WindMeterItem(new Item.Settings().registryKey(RegistryKey.of(RegistryKeys.ITEM, WIND_METER_ID)).maxCount(1))
-        );
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.TOOLS).register(entries -> entries.add(WIND_METER_ITEM));
-        RegistryKey<Block> turbineProbeKey = RegistryKey.of(RegistryKeys.BLOCK, WIND_TURBINE_PROBE_ID);
-        WIND_TURBINE_PROBE_BLOCK = new WindTurbineProbeBlock(Block.Settings.create().registryKey(turbineProbeKey).strength(1.5f));
-        Registry.register(Registries.BLOCK, WIND_TURBINE_PROBE_ID, WIND_TURBINE_PROBE_BLOCK);
-        WIND_TURBINE_PROBE_ITEM = Registry.register(
-            Registries.ITEM,
-            WIND_TURBINE_PROBE_ID,
-            new BlockItem(
-                WIND_TURBINE_PROBE_BLOCK,
-                new Item.Settings().registryKey(RegistryKey.of(RegistryKeys.ITEM, WIND_TURBINE_PROBE_ID))
-            )
-        );
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(WIND_TURBINE_PROBE_ITEM));
-        FAN_BLOCK_ENTITY = Registry.register(
-            Registries.BLOCK_ENTITY_TYPE,
-            FAN_ID,
-            FabricBlockEntityTypeBuilder.create(FanBlockEntity::new, FAN_BLOCK).build()
-        );
-        WIND_TURBINE_PROBE_BLOCK_ENTITY = Registry.register(
-            Registries.BLOCK_ENTITY_TYPE,
-            WIND_TURBINE_PROBE_ID,
-            FabricBlockEntityTypeBuilder.create(WindTurbineProbeBlockEntity::new, WIND_TURBINE_PROBE_BLOCK).build()
-        );
     }
 }

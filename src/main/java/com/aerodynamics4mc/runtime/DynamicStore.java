@@ -12,12 +12,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import net.minecraft.registry.RegistryKey;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.WorldSavePath;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.storage.LevelResource;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 
 final class DynamicStore implements AutoCloseable {
     private static final int MAGIC = 0x41344459;
@@ -31,8 +31,8 @@ final class DynamicStore implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     boolean loadRegion(
-        ServerWorld world,
-        RegistryKey<World> worldKey,
+        ServerLevel level,
+        ResourceKey<Level> levelKey,
         BlockPos regionOrigin,
         int sizeX,
         int sizeY,
@@ -41,7 +41,7 @@ final class DynamicStore implements AutoCloseable {
         float[] airTemperatureState,
         float[] surfaceTemperatureState
     ) {
-        Path path = regionFile(world.getServer(), worldKey, regionOrigin);
+        Path path = regionFile(level.getServer(), levelKey, regionOrigin);
         if (!Files.isRegularFile(path)) {
             return false;
         }
@@ -62,8 +62,8 @@ final class DynamicStore implements AutoCloseable {
     }
 
     void storeRegion(
-        ServerWorld world,
-        RegistryKey<World> worldKey,
+        ServerLevel level,
+        ResourceKey<Level> levelKey,
         BlockPos regionOrigin,
         int sizeX,
         int sizeY,
@@ -76,12 +76,12 @@ final class DynamicStore implements AutoCloseable {
             return;
         }
         StoredRegion stored = StoredRegion.capture(regionOrigin, sizeX, sizeY, sizeZ, flowState, airTemperatureState, surfaceTemperatureState);
-        ioExecutor.execute(() -> writeRegion(world.getServer(), worldKey, stored));
+        ioExecutor.execute(() -> writeRegion(level.getServer(), levelKey, stored));
     }
 
     void storeCapturedRegion(
-        ServerWorld world,
-        RegistryKey<World> worldKey,
+        ServerLevel level,
+        ResourceKey<Level> levelKey,
         BlockPos regionOrigin,
         int sizeX,
         int sizeY,
@@ -94,12 +94,12 @@ final class DynamicStore implements AutoCloseable {
             return;
         }
         StoredRegion stored = StoredRegion.captureOwned(regionOrigin, sizeX, sizeY, sizeZ, flowState, airTemperatureState, surfaceTemperatureState);
-        ioExecutor.execute(() -> writeRegion(world.getServer(), worldKey, stored));
+        ioExecutor.execute(() -> writeRegion(level.getServer(), levelKey, stored));
     }
 
     void storeCapturedRegionSync(
-        ServerWorld world,
-        RegistryKey<World> worldKey,
+        ServerLevel level,
+        ResourceKey<Level> levelKey,
         BlockPos regionOrigin,
         int sizeX,
         int sizeY,
@@ -112,17 +112,17 @@ final class DynamicStore implements AutoCloseable {
             return;
         }
         StoredRegion stored = StoredRegion.captureOwned(regionOrigin, sizeX, sizeY, sizeZ, flowState, airTemperatureState, surfaceTemperatureState);
-        writeRegion(world.getServer(), worldKey, stored);
+        writeRegion(level.getServer(), levelKey, stored);
     }
 
-    void invalidateRegion(ServerWorld world, RegistryKey<World> worldKey, BlockPos regionOrigin) {
+    void invalidateRegion(ServerLevel level, ResourceKey<Level> levelKey, BlockPos regionOrigin) {
         if (closed.get()) {
             return;
         }
-        BlockPos aligned = regionOrigin.toImmutable();
+        BlockPos aligned = regionOrigin.immutable();
         ioExecutor.execute(() -> {
             try {
-                Files.deleteIfExists(regionFile(world.getServer(), worldKey, aligned));
+                Files.deleteIfExists(regionFile(level.getServer(), levelKey, aligned));
             } catch (IOException ignored) {
             }
         });
@@ -141,8 +141,8 @@ final class DynamicStore implements AutoCloseable {
         }
     }
 
-    private void writeRegion(MinecraftServer server, RegistryKey<World> worldKey, StoredRegion stored) {
-        Path path = regionFile(server, worldKey, stored.origin());
+    private void writeRegion(MinecraftServer server, ResourceKey<Level> levelKey, StoredRegion stored) {
+        Path path = regionFile(server, levelKey, stored.origin());
         try {
             Files.createDirectories(path.getParent());
             try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(path)))) {
@@ -159,12 +159,12 @@ final class DynamicStore implements AutoCloseable {
         }
     }
 
-    private Path regionFile(MinecraftServer server, RegistryKey<World> worldKey, BlockPos regionOrigin) {
-        Path root = server.getSavePath(WorldSavePath.ROOT)
+    private Path regionFile(MinecraftServer server, ResourceKey<Level> levelKey, BlockPos regionOrigin) {
+        Path root = server.getWorldPath(LevelResource.ROOT)
             .resolve("aerodynamics4mc")
             .resolve("dynamic_store_v1");
-        String namespace = worldKey.getValue().getNamespace();
-        String path = worldKey.getValue().getPath().replace('/', '_');
+        String namespace = levelKey.location().getNamespace();
+        String path = levelKey.location().getPath().replace('/', '_');
         return root
             .resolve(namespace)
             .resolve(path)
@@ -202,7 +202,7 @@ final class DynamicStore implements AutoCloseable {
             float[] surfaceTemperatureState
         ) {
             return new StoredRegion(
-                origin.toImmutable(),
+                origin.immutable(),
                 sizeX,
                 sizeY,
                 sizeZ,
@@ -222,7 +222,7 @@ final class DynamicStore implements AutoCloseable {
             float[] surfaceTemperatureState
         ) {
             return new StoredRegion(
-                origin.toImmutable(),
+                origin.immutable(),
                 sizeX,
                 sizeY,
                 sizeZ,

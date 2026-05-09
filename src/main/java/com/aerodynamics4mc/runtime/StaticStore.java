@@ -12,11 +12,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import net.minecraft.registry.RegistryKey;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.WorldSavePath;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import net.minecraft.world.level.storage.LevelResource;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 
 final class StaticStore implements AutoCloseable {
     private static final int MAGIC = 0x41345353;
@@ -31,11 +31,11 @@ final class StaticStore implements AutoCloseable {
 
     boolean loadSection(
         MinecraftServer server,
-        RegistryKey<World> worldKey,
+        ResourceKey<Level> levelKey,
         BlockPos sectionOrigin,
-        WorldMirror.SectionSnapshot snapshot
+        LevelMirror.SectionSnapshot snapshot
     ) {
-        Path path = sectionFile(server, worldKey, sectionOrigin);
+        Path path = sectionFile(server, levelKey, sectionOrigin);
         if (!Files.isRegularFile(path)) {
             return false;
         }
@@ -62,25 +62,25 @@ final class StaticStore implements AutoCloseable {
 
     void storeSection(
         MinecraftServer server,
-        RegistryKey<World> worldKey,
+        ResourceKey<Level> levelKey,
         BlockPos sectionOrigin,
-        WorldMirror.SectionSnapshot snapshot
+        LevelMirror.SectionSnapshot snapshot
     ) {
         if (closed.get()) {
             return;
         }
         StoredSection stored = StoredSection.capture(snapshot, sectionOrigin);
-        ioExecutor.execute(() -> writeSection(server, worldKey, stored));
+        ioExecutor.execute(() -> writeSection(server, levelKey, stored));
     }
 
-    void invalidateSection(MinecraftServer server, RegistryKey<World> worldKey, BlockPos sectionOrigin) {
+    void invalidateSection(MinecraftServer server, ResourceKey<Level> levelKey, BlockPos sectionOrigin) {
         if (closed.get()) {
             return;
         }
         BlockPos aligned = alignSectionOrigin(sectionOrigin);
         ioExecutor.execute(() -> {
             try {
-                Files.deleteIfExists(sectionFile(server, worldKey, aligned));
+                Files.deleteIfExists(sectionFile(server, levelKey, aligned));
             } catch (IOException ignored) {
             }
         });
@@ -99,8 +99,8 @@ final class StaticStore implements AutoCloseable {
         }
     }
 
-    private void writeSection(MinecraftServer server, RegistryKey<World> worldKey, StoredSection stored) {
-        Path path = sectionFile(server, worldKey, stored.origin());
+    private void writeSection(MinecraftServer server, ResourceKey<Level> levelKey, StoredSection stored) {
+        Path path = sectionFile(server, levelKey, stored.origin());
         try {
             Files.createDirectories(path.getParent());
             try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(path)))) {
@@ -119,12 +119,12 @@ final class StaticStore implements AutoCloseable {
         }
     }
 
-    private Path sectionFile(MinecraftServer server, RegistryKey<World> worldKey, BlockPos sectionOrigin) {
-        Path root = server.getSavePath(WorldSavePath.ROOT)
+    private Path sectionFile(MinecraftServer server, ResourceKey<Level> levelKey, BlockPos sectionOrigin) {
+        Path root = server.getWorldPath(LevelResource.ROOT)
             .resolve("aerodynamics4mc")
             .resolve("static_store_v1");
-        String namespace = worldKey.getValue().getNamespace();
-        String path = worldKey.getValue().getPath().replace('/', '_');
+        String namespace = levelKey.location().getNamespace();
+        String path = levelKey.location().getPath().replace('/', '_');
         return root
             .resolve(namespace)
             .resolve(path)
@@ -156,9 +156,9 @@ final class StaticStore implements AutoCloseable {
     }
 
     private static BlockPos alignSectionOrigin(BlockPos pos) {
-        int x = Math.floorDiv(pos.getX(), WorldMirror.SECTION_SIZE) * WorldMirror.SECTION_SIZE;
-        int y = Math.floorDiv(pos.getY(), WorldMirror.SECTION_SIZE) * WorldMirror.SECTION_SIZE;
-        int z = Math.floorDiv(pos.getZ(), WorldMirror.SECTION_SIZE) * WorldMirror.SECTION_SIZE;
+        int x = Math.floorDiv(pos.getX(), LevelMirror.SECTION_SIZE) * LevelMirror.SECTION_SIZE;
+        int y = Math.floorDiv(pos.getY(), LevelMirror.SECTION_SIZE) * LevelMirror.SECTION_SIZE;
+        int z = Math.floorDiv(pos.getZ(), LevelMirror.SECTION_SIZE) * LevelMirror.SECTION_SIZE;
         return new BlockPos(x, y, z);
     }
 
@@ -173,7 +173,7 @@ final class StaticStore implements AutoCloseable {
         byte[] faceSkyExposure,
         byte[] faceDirectExposure
     ) {
-        private static StoredSection capture(WorldMirror.SectionSnapshot snapshot, BlockPos origin) {
+        private static StoredSection capture(LevelMirror.SectionSnapshot snapshot, BlockPos origin) {
             return new StoredSection(
                 alignSectionOrigin(origin),
                 snapshot.version(),

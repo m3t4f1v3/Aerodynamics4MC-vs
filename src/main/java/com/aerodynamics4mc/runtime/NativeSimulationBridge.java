@@ -14,16 +14,16 @@ public final class NativeSimulationBridge {
     public static final int BRICK_HINT_COORDS_PER_BRICK = 3;
     public static final int BRICK_RUNTIME_STATUS_FIELDS = 8;
     private static final int FACE_COUNT = 6;
-    public static final int WORLD_DELTA_BLOCK_CHANGED = 1;
-    public static final int WORLD_DELTA_CHUNK_LOADED = 2;
-    public static final int WORLD_DELTA_CHUNK_UNLOADED = 3;
-    public static final int WORLD_DELTA_BLOCK_ENTITY_LOADED = 4;
-    public static final int WORLD_DELTA_BLOCK_ENTITY_UNLOADED = 5;
-    public static final int WORLD_DELTA_WORLD_UNLOADED = 6;
-    public static final int WORLD_DELTA_FOCUS_CHANGED = 7;
-    public static final int WORLD_DELTA_BRICK_STATIC_CELL_PATCH = 8;
-    private static final int WORLD_DELTA_INTS_PER_ENTRY = 8;
-    private static final int WORLD_DELTA_FLOATS_PER_ENTRY = 4;
+    public static final int Level_DELTA_BLOCK_CHANGED = 1;
+    public static final int Level_DELTA_CHUNK_LOADED = 2;
+    public static final int Level_DELTA_CHUNK_UNLOADED = 3;
+    public static final int Level_DELTA_BLOCK_ENTITY_LOADED = 4;
+    public static final int Level_DELTA_BLOCK_ENTITY_UNLOADED = 5;
+    public static final int Level_DELTA_Level_UNLOADED = 6;
+    public static final int Level_DELTA_FOCUS_CHANGED = 7;
+    public static final int Level_DELTA_BRICK_STATIC_CELL_PATCH = 8;
+    private static final int Level_DELTA_INTS_PER_ENTRY = 8;
+    private static final int Level_DELTA_FLOATS_PER_ENTRY = 4;
 
     private static final String LIB_NAME = "aero_lbm";
     private static final boolean LOADED;
@@ -72,18 +72,18 @@ public final class NativeSimulationBridge {
             && nativeSetFocus(serviceKey, blockX, blockY, blockZ, radiusBlocks);
     }
 
-    public boolean submitWorldDeltas(long serviceKey, WorldDelta[] deltas) {
+    public boolean submitLevelDeltas(long serviceKey, LevelDelta[] deltas) {
         if (!LOADED || serviceKey == 0L || deltas == null) {
             return false;
         }
         if (deltas.length == 0) {
-            return nativeSubmitWorldDeltas(serviceKey, new int[0], new float[0]);
+            return nativeSubmitLevelDeltas(serviceKey, new int[0], new float[0]);
         }
-        int[] ints = new int[deltas.length * WORLD_DELTA_INTS_PER_ENTRY];
-        float[] floats = new float[deltas.length * WORLD_DELTA_FLOATS_PER_ENTRY];
+        int[] ints = new int[deltas.length * Level_DELTA_INTS_PER_ENTRY];
+        float[] floats = new float[deltas.length * Level_DELTA_FLOATS_PER_ENTRY];
         for (int i = 0; i < deltas.length; i++) {
-            WorldDelta delta = deltas[i];
-            int intBase = i * WORLD_DELTA_INTS_PER_ENTRY;
+            LevelDelta delta = deltas[i];
+            int intBase = i * Level_DELTA_INTS_PER_ENTRY;
             ints[intBase] = delta.type();
             ints[intBase + 1] = delta.x();
             ints[intBase + 2] = delta.y();
@@ -93,61 +93,61 @@ public final class NativeSimulationBridge {
             ints[intBase + 6] = delta.data2();
             ints[intBase + 7] = delta.data3();
 
-            int floatBase = i * WORLD_DELTA_FLOATS_PER_ENTRY;
+            int floatBase = i * Level_DELTA_FLOATS_PER_ENTRY;
             floats[floatBase] = delta.value0();
             floats[floatBase + 1] = delta.value1();
             floats[floatBase + 2] = delta.value2();
             floats[floatBase + 3] = delta.value3();
         }
-        return nativeSubmitWorldDeltas(serviceKey, ints, floats);
+        return nativeSubmitLevelDeltas(serviceKey, ints, floats);
     }
 
-    public boolean submitWorldDelta(long serviceKey, WorldDelta delta) {
-        return submitWorldDeltas(serviceKey, new WorldDelta[] {delta});
+    public boolean submitLevelDelta(long serviceKey, LevelDelta delta) {
+        return submitLevelDeltas(serviceKey, new LevelDelta[] {delta});
     }
 
-    public boolean ensureBrickWorldRuntime(
+    public boolean ensureBrickLevelRuntime(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         float dxMeters,
         float dtSeconds
     ) {
-        return LOADED && serviceKey != 0L && worldKey != 0L
+        return LOADED && serviceKey != 0L && levelKey != 0L
             && brickSize > 0
             && Float.isFinite(dxMeters) && dxMeters > 0.0f
             && Float.isFinite(dtSeconds) && dtSeconds > 0.0f
-            && nativeEnsureBrickWorldRuntime(serviceKey, worldKey, brickSize, dxMeters, dtSeconds);
+            && nativeEnsureBrickLevelRuntime(serviceKey, levelKey, brickSize, dxMeters, dtSeconds);
     }
 
-    public boolean setBrickWorldActiveHints(
+    public boolean setBrickLevelActiveHints(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int[] brickCoords
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0 || brickCoords == null) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0 || brickCoords == null) {
             return false;
         }
         if ((brickCoords.length % BRICK_HINT_COORDS_PER_BRICK) != 0) {
             return false;
         }
-        return nativeSetBrickWorldActiveHints(
+        return nativeSetBrickLevelActiveHints(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickCoords,
             brickCoords.length / BRICK_HINT_COORDS_PER_BRICK
         );
     }
 
-    public boolean setBrickWorldExactActiveHints(
+    public boolean setBrickLevelExactActiveHints(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int[] brickCoords
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0 || brickCoords == null) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0 || brickCoords == null) {
             return false;
         }
         if ((brickCoords.length % BRICK_HINT_COORDS_PER_BRICK) != 0) {
@@ -158,22 +158,22 @@ public final class NativeSimulationBridge {
             return false;
         }
         try {
-            return nativeSetBrickWorldExactActiveHints(serviceKey, worldKey, brickSize, brickCoords, brickCount);
+            return nativeSetBrickLevelExactActiveHints(serviceKey, levelKey, brickSize, brickCoords, brickCount);
         } catch (UnsatisfiedLinkError error) {
             exactActiveHintsSupported = false;
             return false;
         }
     }
 
-    public BrickWorldRuntimeStatus getBrickWorldRuntimeStatus(long serviceKey, long worldKey) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L) {
+    public BrickLevelRuntimeStatus getBrickLevelRuntimeStatus(long serviceKey, long levelKey) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L) {
             return null;
         }
         int[] status = new int[BRICK_RUNTIME_STATUS_FIELDS];
-        if (!nativeGetBrickWorldRuntimeStatus(serviceKey, worldKey, status)) {
+        if (!nativeGetBrickLevelRuntimeStatus(serviceKey, levelKey, status)) {
             return null;
         }
-        return new BrickWorldRuntimeStatus(
+        return new BrickLevelRuntimeStatus(
             status[0],
             status[1],
             status[2],
@@ -185,29 +185,29 @@ public final class NativeSimulationBridge {
         );
     }
 
-    public boolean stepBrickWorldRuntime(long serviceKey, long worldKey, int stepCount) {
-        return LOADED && serviceKey != 0L && worldKey != 0L
+    public boolean stepBrickLevelRuntime(long serviceKey, long levelKey, int stepCount) {
+        return LOADED && serviceKey != 0L && levelKey != 0L
             && stepCount > 0
-            && nativeStepBrickWorldRuntime(serviceKey, worldKey, stepCount);
+            && nativeStepBrickLevelRuntime(serviceKey, levelKey, stepCount);
     }
 
-    public int[] getBrickWorldResidentBrickCoords(long serviceKey, long worldKey) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L) {
+    public int[] getBrickLevelResidentBrickCoords(long serviceKey, long levelKey) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L) {
             return null;
         }
-        return nativeGetBrickWorldResidentBrickCoords(serviceKey, worldKey);
+        return nativeGetBrickLevelResidentBrickCoords(serviceKey, levelKey);
     }
 
-    public int[] getBrickWorldActiveBrickCoords(long serviceKey, long worldKey) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L) {
+    public int[] getBrickLevelActiveBrickCoords(long serviceKey, long levelKey) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L) {
             return null;
         }
-        return nativeGetBrickWorldActiveBrickCoords(serviceKey, worldKey);
+        return nativeGetBrickLevelActiveBrickCoords(serviceKey, levelKey);
     }
 
-    public boolean uploadBrickWorldStaticBrick(
+    public boolean uploadBrickLevelStaticBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -219,7 +219,7 @@ public final class NativeSimulationBridge {
         byte[] faceSkyExposure,
         byte[] faceDirectExposure
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         int cells = checkedCellCount(brickSize, brickSize, brickSize);
@@ -238,9 +238,9 @@ public final class NativeSimulationBridge {
             || faceDirectExposure.length != cells * FACE_COUNT) {
             return false;
         }
-        return nativeUploadBrickWorldStaticBrick(
+        return nativeUploadBrickLevelStaticBrick(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickX,
             brickY,
@@ -254,9 +254,9 @@ public final class NativeSimulationBridge {
         );
     }
 
-    public boolean queueBrickWorldStaticBrickUpload(
+    public boolean queueBrickLevelStaticBrickUpload(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -268,7 +268,7 @@ public final class NativeSimulationBridge {
         byte[] faceSkyExposure,
         byte[] faceDirectExposure
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         int cells = checkedCellCount(brickSize, brickSize, brickSize);
@@ -287,9 +287,9 @@ public final class NativeSimulationBridge {
             || faceDirectExposure.length != cells * FACE_COUNT) {
             return false;
         }
-        return nativeQueueBrickWorldStaticBrickUpload(
+        return nativeQueueBrickLevelStaticBrickUpload(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickX,
             brickY,
@@ -303,10 +303,10 @@ public final class NativeSimulationBridge {
         );
     }
 
-    public boolean syncRegionCoreToBrickWorld(
+    public boolean syncRegionCoreToBrickLevel(
         long serviceKey,
         long regionKey,
-        long worldKey,
+        long levelKey,
         int regionNx,
         int regionNy,
         int regionNz,
@@ -323,11 +323,11 @@ public final class NativeSimulationBridge {
         return LOADED
             && serviceKey != 0L
             && regionKey != 0L
-            && worldKey != 0L
-            && nativeSyncRegionCoreToBrickWorld(
+            && levelKey != 0L
+            && nativeSyncRegionCoreToBrickLevel(
                 serviceKey,
                 regionKey,
-                worldKey,
+                levelKey,
                 regionNx,
                 regionNy,
                 regionNz,
@@ -343,9 +343,9 @@ public final class NativeSimulationBridge {
             );
     }
 
-    public boolean copyBrickWorldDynamicBrick(
+    public boolean copyBrickLevelDynamicBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -354,7 +354,7 @@ public final class NativeSimulationBridge {
         float[] outAirTemperature,
         float[] outSurfaceTemperature
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         int cells = checkedCellCount(brickSize, brickSize, brickSize);
@@ -367,9 +367,9 @@ public final class NativeSimulationBridge {
             || outSurfaceTemperature.length != cells) {
             return false;
         }
-        return nativeCopyBrickWorldDynamicBrick(
+        return nativeCopyBrickLevelDynamicBrick(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickX,
             brickY,
@@ -380,9 +380,9 @@ public final class NativeSimulationBridge {
         );
     }
 
-    public boolean copyBrickWorldPackedFlowAtlas(
+    public boolean copyBrickLevelPackedFlowAtlas(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -390,7 +390,7 @@ public final class NativeSimulationBridge {
         int sampleStride,
         short[] outPackedFlow
     ) {
-        if (!LOADED || !packedBrickAtlasSupported || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || !packedBrickAtlasSupported || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         if (sampleStride <= 0 || outPackedFlow == null) {
@@ -402,9 +402,9 @@ public final class NativeSimulationBridge {
             return false;
         }
         try {
-            return nativeCopyBrickWorldPackedFlowAtlas(
+            return nativeCopyBrickLevelPackedFlowAtlas(
                 serviceKey,
-                worldKey,
+                levelKey,
                 brickSize,
                 brickX,
                 brickY,
@@ -418,9 +418,9 @@ public final class NativeSimulationBridge {
         }
     }
 
-    public boolean uploadBrickWorldDynamicBrick(
+    public boolean uploadBrickLevelDynamicBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -429,7 +429,7 @@ public final class NativeSimulationBridge {
         float[] airTemperature,
         float[] surfaceTemperature
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         int cells = checkedCellCount(brickSize, brickSize, brickSize);
@@ -442,9 +442,9 @@ public final class NativeSimulationBridge {
             || surfaceTemperature.length != cells) {
             return false;
         }
-        return nativeUploadBrickWorldDynamicBrick(
+        return nativeUploadBrickLevelDynamicBrick(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickX,
             brickY,
@@ -455,9 +455,9 @@ public final class NativeSimulationBridge {
         );
     }
 
-    public boolean uploadBrickWorldBoundaryReferenceBrick(
+    public boolean uploadBrickLevelBoundaryReferenceBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -466,7 +466,7 @@ public final class NativeSimulationBridge {
         float[] airTemperature,
         float[] surfaceTemperature
     ) {
-        if (!LOADED || serviceKey == 0L || worldKey == 0L || brickSize <= 0) {
+        if (!LOADED || serviceKey == 0L || levelKey == 0L || brickSize <= 0) {
             return false;
         }
         int cells = checkedCellCount(brickSize, brickSize, brickSize);
@@ -479,9 +479,9 @@ public final class NativeSimulationBridge {
             || surfaceTemperature.length != cells) {
             return false;
         }
-        return nativeUploadBrickWorldBoundaryReferenceBrick(
+        return nativeUploadBrickLevelBoundaryReferenceBrick(
             serviceKey,
-            worldKey,
+            levelKey,
             brickSize,
             brickX,
             brickY,
@@ -1131,7 +1131,7 @@ public final class NativeSimulationBridge {
         return cells > Integer.MAX_VALUE ? -1 : (int) cells;
     }
 
-    public record WorldDelta(
+    public record LevelDelta(
         int type,
         int x,
         int y,
@@ -1157,7 +1157,7 @@ public final class NativeSimulationBridge {
     ) {
     }
 
-    public record BrickWorldRuntimeStatus(
+    public record BrickLevelRuntimeStatus(
         int brickSize,
         int knownBrickCount,
         int activeHintCount,
@@ -1175,57 +1175,57 @@ public final class NativeSimulationBridge {
 
     private static native boolean nativeSetFocus(long serviceKey, int blockX, int blockY, int blockZ, int radiusBlocks);
 
-    private static native boolean nativeSubmitWorldDeltas(long serviceKey, int[] encodedInts, float[] encodedFloats);
+    private static native boolean nativeSubmitLevelDeltas(long serviceKey, int[] encodedInts, float[] encodedFloats);
 
-    private static native boolean nativeEnsureBrickWorldRuntime(
+    private static native boolean nativeEnsureBrickLevelRuntime(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         float dxMeters,
         float dtSeconds
     );
 
-    private static native boolean nativeSetBrickWorldActiveHints(
+    private static native boolean nativeSetBrickLevelActiveHints(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int[] brickCoords,
         int brickCount
     );
 
-    private static native boolean nativeSetBrickWorldExactActiveHints(
+    private static native boolean nativeSetBrickLevelExactActiveHints(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int[] brickCoords,
         int brickCount
     );
 
-    private static native boolean nativeGetBrickWorldRuntimeStatus(
+    private static native boolean nativeGetBrickLevelRuntimeStatus(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int[] outStatus
     );
 
-    private static native boolean nativeStepBrickWorldRuntime(
+    private static native boolean nativeStepBrickLevelRuntime(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int stepCount
     );
 
-    private static native int[] nativeGetBrickWorldResidentBrickCoords(
+    private static native int[] nativeGetBrickLevelResidentBrickCoords(
         long serviceKey,
-        long worldKey
+        long levelKey
     );
 
-    private static native int[] nativeGetBrickWorldActiveBrickCoords(
+    private static native int[] nativeGetBrickLevelActiveBrickCoords(
         long serviceKey,
-        long worldKey
+        long levelKey
     );
 
-    private static native boolean nativeUploadBrickWorldStaticBrick(
+    private static native boolean nativeUploadBrickLevelStaticBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -1238,9 +1238,9 @@ public final class NativeSimulationBridge {
         byte[] faceDirectExposure
     );
 
-    private static native boolean nativeQueueBrickWorldStaticBrickUpload(
+    private static native boolean nativeQueueBrickLevelStaticBrickUpload(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -1253,10 +1253,10 @@ public final class NativeSimulationBridge {
         byte[] faceDirectExposure
     );
 
-    private static native boolean nativeSyncRegionCoreToBrickWorld(
+    private static native boolean nativeSyncRegionCoreToBrickLevel(
         long serviceKey,
         long regionKey,
-        long worldKey,
+        long levelKey,
         int regionNx,
         int regionNy,
         int regionNz,
@@ -1271,9 +1271,9 @@ public final class NativeSimulationBridge {
         int brickZ
     );
 
-    private static native boolean nativeCopyBrickWorldDynamicBrick(
+    private static native boolean nativeCopyBrickLevelDynamicBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -1282,9 +1282,9 @@ public final class NativeSimulationBridge {
         float[] outAirTemperature,
         float[] outSurfaceTemperature
     );
-    private static native boolean nativeCopyBrickWorldPackedFlowAtlas(
+    private static native boolean nativeCopyBrickLevelPackedFlowAtlas(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -1292,9 +1292,9 @@ public final class NativeSimulationBridge {
         int sampleStride,
         short[] outPackedFlow
     );
-    private static native boolean nativeUploadBrickWorldDynamicBrick(
+    private static native boolean nativeUploadBrickLevelDynamicBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,
@@ -1303,9 +1303,9 @@ public final class NativeSimulationBridge {
         float[] airTemperature,
         float[] surfaceTemperature
     );
-    private static native boolean nativeUploadBrickWorldBoundaryReferenceBrick(
+    private static native boolean nativeUploadBrickLevelBoundaryReferenceBrick(
         long serviceKey,
-        long worldKey,
+        long levelKey,
         int brickSize,
         int brickX,
         int brickY,

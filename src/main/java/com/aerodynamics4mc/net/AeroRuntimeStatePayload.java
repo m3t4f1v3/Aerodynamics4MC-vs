@@ -1,38 +1,25 @@
 package com.aerodynamics4mc.net;
 
-import com.aerodynamics4mc.ModBlocks;
+import net.minecraft.network.FriendlyByteBuf;
 
-import net.minecraft.network.RegistryByteBuf;
-import net.minecraft.network.codec.PacketCodec;
-import net.minecraft.network.packet.CustomPayload;
-import net.minecraft.util.Identifier;
+public class AeroRuntimeStatePayload {
+    public final boolean streamingEnabled;
+    public final boolean renderVelocityVectors;
+    public final boolean renderStreamlines;
 
-public record AeroRuntimeStatePayload(
-    boolean streamingEnabled,
-    boolean renderVelocityVectors,
-    boolean renderStreamlines
-) implements CustomPayload {
-    public static final CustomPayload.Id<AeroRuntimeStatePayload> ID =
-        new CustomPayload.Id<>(Identifier.of(ModBlocks.MOD_ID, "runtime_state"));
-    public static final PacketCodec<RegistryByteBuf, AeroRuntimeStatePayload> CODEC =
-        PacketCodec.of(AeroRuntimeStatePayload::write, AeroRuntimeStatePayload::new);
-
-    private AeroRuntimeStatePayload(RegistryByteBuf buf) {
-        this(
-            buf.readBoolean(),
-            buf.readBoolean(),
-            buf.readBoolean()
-        );
+    public AeroRuntimeStatePayload(boolean streamingEnabled, boolean renderVelocityVectors, boolean renderStreamlines) {
+        this.streamingEnabled = streamingEnabled;
+        this.renderVelocityVectors = renderVelocityVectors;
+        this.renderStreamlines = renderStreamlines;
     }
 
-    private void write(RegistryByteBuf buf) {
+    public AeroRuntimeStatePayload(FriendlyByteBuf buf) {
+        this(buf.readBoolean(), buf.readBoolean(), buf.readBoolean());
+    }
+
+    public void toBytes(FriendlyByteBuf buf) {
         buf.writeBoolean(streamingEnabled);
         buf.writeBoolean(renderVelocityVectors);
         buf.writeBoolean(renderStreamlines);
-    }
-
-    @Override
-    public Id<? extends CustomPayload> getId() {
-        return ID;
     }
 }

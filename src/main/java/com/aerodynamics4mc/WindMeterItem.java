@@ -1,25 +1,23 @@
 package com.aerodynamics4mc;
 
+import java.util.List;
 import java.util.Locale;
-import java.util.function.Consumer;
-
 import com.aerodynamics4mc.api.AeroWindApi;
 import com.aerodynamics4mc.api.GameplayWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 
-import net.minecraft.component.type.TooltipDisplayComponent;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.tooltip.TooltipType;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.Text;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Formatting;
-import net.minecraft.util.Hand;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.World;
+import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResultHolder;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
+import net.minecraft.world.level.Level;
 
 public final class WindMeterItem extends Item {
     private static final double CALM_HORIZONTAL_SPEED_MPS = 0.05;
@@ -34,48 +32,48 @@ public final class WindMeterItem extends Item {
         "north_west"
     };
 
-    public WindMeterItem(Settings settings) {
+    public WindMeterItem(Properties settings) {
         super(settings);
     }
 
     @Override
-    public ActionResult use(World world, PlayerEntity user, Hand hand) {
-        if (world.isClient()) {
-            return ActionResult.SUCCESS;
+    public InteractionResultHolder<ItemStack> use(Level level, Player user, InteractionHand hand) {
+        if (level.isClientSide()) {
+            return InteractionResultHolder.success(user.getItemInHand(hand));
         }
-        if (!(world instanceof ServerWorld)) {
-            return ActionResult.PASS;
+        if (!(level instanceof ServerLevel)) {
+            return InteractionResultHolder.pass(user.getItemInHand(hand));
         }
-        if (!(user instanceof ServerPlayerEntity serverPlayer)) {
-            return ActionResult.PASS;
+        if (!(user instanceof ServerPlayer serverPlayer)) {
+            return InteractionResultHolder.pass(user.getItemInHand(hand));
         }
 
-        Vec3d samplePos = new Vec3d(user.getX(), user.getY() + 1.2, user.getZ());
+        Vec3 samplePos = new Vec3(user.getX(), user.getY() + 1.2, user.getZ());
         GameplayWindSample sample = AeroWindApi.sampleGameplay(serverPlayer, samplePos, SamplePolicy.GAMEPLAY_SERVER_ONLY);
-        user.getItemCooldownManager().set(user.getStackInHand(hand), 10);
+        user.getCooldowns().addCooldown(user.getItemInHand(hand).getItem(), 10);
 
         if (!sample.hasFlow()) {
-            user.sendMessage(Text.translatable("message.aerodynamics4mc.wind_meter.no_flow").formatted(Formatting.GRAY), false);
-            return ActionResult.SUCCESS_SERVER;
+            user.displayClientMessage(Component.translatable("message.aerodynamics4mc.wind_meter.no_flow").withStyle(ChatFormatting.GRAY), false);
+            return InteractionResultHolder.success(user.getItemInHand(hand));
         }
 
-        Vec3d effective = sample.effectiveVelocity();
-        Vec3d mean = sample.meanVelocity();
-        Vec3d gust = sample.gustVelocity();
-        Text direction = directionText((float) effective.x, (float) effective.z);
-        user.sendMessage(
-            Text.translatable(
+        Vec3 effective = sample.effectiveVelocity();
+        Vec3 mean = sample.meanVelocity();
+        Vec3 gust = sample.gustVelocity();
+        Component direction = directionText((float) effective.x, (float) effective.z);
+        user.displayClientMessage(
+            Component.translatable(
                 "message.aerodynamics4mc.wind_meter.summary",
                 format(sample.effectiveSpeedMetersPerSecond()),
                 direction,
                 signed(effective.x),
                 signed(effective.y),
                 signed(effective.z)
-            ).formatted(Formatting.AQUA),
+            ).withStyle(ChatFormatting.AQUA),
             false
         );
-        user.sendMessage(
-            Text.translatable(
+        user.displayClientMessage(
+            Component.translatable(
                 "message.aerodynamics4mc.wind_meter.mean_gust",
                 format(sample.meanSpeedMetersPerSecond()),
                 signed(mean.x),
@@ -83,62 +81,61 @@ public final class WindMeterItem extends Item {
                 signed(mean.z),
                 format(gust.length()),
                 signed(sample.updraftMetersPerSecond())
-            ).formatted(Formatting.GRAY),
+            ).withStyle(ChatFormatting.GRAY),
             false
         );
-        user.sendMessage(
-            Text.translatable(
+        user.displayClientMessage(
+            Component.translatable(
                 "message.aerodynamics4mc.wind_meter.gameplay",
                 format(sample.turbulenceIntensity()),
                 format(sample.windShearMagnitudePerBlock()),
                 percent(sample.shelterFactor()),
                 format(sample.ablMixingStrength())
-            ).formatted(Formatting.DARK_AQUA),
+            ).withStyle(ChatFormatting.DARK_AQUA),
             false
         );
-        user.sendMessage(
-            Text.translatable(
+        user.displayClientMessage(
+            Component.translatable(
                 "message.aerodynamics4mc.wind_meter.source",
                 sample.sourceLevel().name(),
                 sample.authority().name(),
                 percent(sample.confidence()),
                 signed(sample.pressure())
-            ).formatted(Formatting.DARK_GRAY),
+            ).withStyle(ChatFormatting.DARK_GRAY),
             false
         );
         if (sample.hasTemperature() || sample.hasHumidity()) {
-            user.sendMessage(
-                Text.translatable(
+            user.displayClientMessage(
+                Component.translatable(
                     "message.aerodynamics4mc.wind_meter.atmosphere",
                     sample.hasTemperature() ? format(sample.temperatureKelvin() - 273.15f) : "n/a",
                     sample.hasHumidity() ? percent(sample.humidity()) : "n/a",
                     format(sample.ablStability())
-                ).formatted(Formatting.DARK_AQUA),
+                ).withStyle(ChatFormatting.DARK_AQUA),
                 false
             );
         }
-        return ActionResult.SUCCESS_SERVER;
+        return InteractionResultHolder.success(user.getItemInHand(hand));
     }
 
     @Override
-    public void appendTooltip(
+    public void appendHoverText(
         ItemStack stack,
-        TooltipContext context,
-        TooltipDisplayComponent display,
-        Consumer<Text> tooltip,
-        TooltipType type
+        Level level,
+        List<Component> components,
+        TooltipFlag flag
     ) {
-        tooltip.accept(Text.translatable("item.aerodynamics4mc.wind_meter.tooltip").formatted(Formatting.GRAY));
+        components.add(Component.translatable("item.aerodynamics4mc.wind_meter.tooltip").withStyle(ChatFormatting.GRAY));
     }
 
-    private static Text directionText(float x, float z) {
+    private static Component directionText(float x, float z) {
         double horizontalSpeed = Math.sqrt(x * x + z * z);
         if (horizontalSpeed < CALM_HORIZONTAL_SPEED_MPS) {
-            return Text.translatable("message.aerodynamics4mc.wind_meter.direction.calm");
+            return Component.translatable("message.aerodynamics4mc.wind_meter.direction.calm");
         }
         double degreesClockwiseFromNorth = Math.toDegrees(Math.atan2(x, -z));
         int index = Math.floorMod((int) Math.round(degreesClockwiseFromNorth / 45.0), DIRECTION_KEYS.length);
-        return Text.translatable("message.aerodynamics4mc.wind_meter.direction." + DIRECTION_KEYS[index]);
+        return Component.translatable("message.aerodynamics4mc.wind_meter.direction." + DIRECTION_KEYS[index]);
     }
 
     private static String format(double value) {

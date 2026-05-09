@@ -1,6 +1,6 @@
 package com.aerodynamics4mc.api;
 
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.phys.Vec3;
 
 public record AeroWindSample(
     float velocityX,
@@ -10,7 +10,7 @@ public record AeroWindSample(
     Level level,
     Authority authority,
     long l1Epoch,
-    long worldDeltaEpoch,
+    long LevelDeltaEpoch,
     long l2Epoch,
     float confidence,
     float temperatureKelvin,
@@ -77,7 +77,7 @@ public record AeroWindSample(
         Level level,
         Authority authority,
         long l1Epoch,
-        long worldDeltaEpoch,
+        long LevelDeltaEpoch,
         long l2Epoch,
         float confidence
     ) {
@@ -89,7 +89,7 @@ public record AeroWindSample(
             level,
             authority,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             confidence,
             UNKNOWN_SCALAR,
@@ -112,7 +112,7 @@ public record AeroWindSample(
         float pressure,
         Level level,
         long l1Epoch,
-        long worldDeltaEpoch,
+        long LevelDeltaEpoch,
         long l2Epoch
     ) {
         return new AeroWindSample(
@@ -123,7 +123,7 @@ public record AeroWindSample(
             level,
             Authority.SERVER_AUTHORITATIVE,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             1.0f
         );
@@ -135,7 +135,7 @@ public record AeroWindSample(
         float velocityZ,
         float pressure,
         long l1Epoch,
-        long worldDeltaEpoch,
+        long LevelDeltaEpoch,
         long l2Epoch,
         float confidence
     ) {
@@ -147,7 +147,7 @@ public record AeroWindSample(
             Level.L2,
             Authority.SERVER_AGGREGATED,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             confidence
         );
@@ -159,7 +159,7 @@ public record AeroWindSample(
         float velocityZ,
         float pressure,
         long l1Epoch,
-        long worldDeltaEpoch,
+        long LevelDeltaEpoch,
         long l2Epoch
     ) {
         return new AeroWindSample(
@@ -170,29 +170,29 @@ public record AeroWindSample(
             Level.L2,
             Authority.CLIENT_LOCAL,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             1.0f
         );
     }
 
-    public Vec3d velocity() {
-        return new Vec3d(velocityX, velocityY, velocityZ);
+    public Vec3 velocity() {
+        return new Vec3(velocityX, velocityY, velocityZ);
     }
 
-    public Vec3d meanVelocity() {
+    public Vec3 meanVelocity() {
         return velocity();
     }
 
-    public Vec3d gustVelocity() {
-        return new Vec3d(gustX, gustY, gustZ);
+    public Vec3 gustVelocity() {
+        return new Vec3(gustX, gustY, gustZ);
     }
 
-    public Vec3d velocityWithGust() {
-        return new Vec3d(velocityX + gustX, velocityY + gustY, velocityZ + gustZ);
+    public Vec3 velocityWithGust() {
+        return new Vec3(velocityX + gustX, velocityY + gustY, velocityZ + gustZ);
     }
 
-    public Vec3d effectiveVelocity() {
+    public Vec3 effectiveVelocity() {
         return velocityWithGust();
     }
 
@@ -256,7 +256,7 @@ public record AeroWindSample(
             level,
             authority,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             confidence,
             temperatureKelvin,
@@ -280,7 +280,7 @@ public record AeroWindSample(
         Level level,
         Authority authority,
         long l1Epoch,
-        long worldDeltaEpoch,
+        long LevelDeltaEpoch,
         long l2Epoch
     ) {
         return new AeroWindSample(
@@ -291,7 +291,7 @@ public record AeroWindSample(
             level,
             authority,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             confidence,
             temperatureKelvin,
@@ -336,8 +336,8 @@ public record AeroWindSample(
         if (l1Epoch > latest) {
             latest = l1Epoch;
         }
-        if (worldDeltaEpoch > latest) {
-            latest = worldDeltaEpoch;
+        if (LevelDeltaEpoch > latest) {
+            latest = LevelDeltaEpoch;
         }
         if (l2Epoch > latest) {
             latest = l2Epoch;
@@ -374,7 +374,7 @@ public record AeroWindSample(
             level,
             authority,
             l1Epoch,
-            worldDeltaEpoch,
+            LevelDeltaEpoch,
             l2Epoch,
             confidence,
             temperatureKelvin,

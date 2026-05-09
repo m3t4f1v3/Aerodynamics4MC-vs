@@ -1,18 +1,16 @@
 package com.aerodynamics4mc;
 
-import com.mojang.serialization.MapCodec;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
-import net.minecraft.block.Block;
 
 public class DuctBlock extends Block {
-    public static final MapCodec<DuctBlock> CODEC = createCodec(DuctBlock::new);
-
-    public DuctBlock(Settings settings) {
+    public DuctBlock(Properties settings) {
         super(settings);
     }
 
-    @Override
-    protected MapCodec<? extends Block> getCodec() {
-        return CODEC;
+    public DuctBlock() {
+        this(BlockBehaviour.Properties.of());
     }
+
 }

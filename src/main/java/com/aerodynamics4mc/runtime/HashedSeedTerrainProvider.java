@@ -1,7 +1,7 @@
 package com.aerodynamics4mc.runtime;
 
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.MathHelper;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 
 final class HashedSeedTerrainProvider implements SeedTerrainProvider {
     static final byte SURFACE_CLASS_WATER = 0;
@@ -11,22 +11,22 @@ final class HashedSeedTerrainProvider implements SeedTerrainProvider {
     static final byte SURFACE_CLASS_SNOW = 4;
 
     @Override
-    public TerrainSample sample(ServerWorld world, int blockX, int blockZ) {
-        long seed = world.getSeed();
+    public TerrainSample sample(ServerLevel level, int blockX, int blockZ) {
+        long seed = level.getSeed();
         float largeScale = fbm(seed ^ 0x6A09E667F3BCC909L, blockX, blockZ, 1024.0f, 3, 0.55f);
         float mediumScale = fbm(seed ^ 0xBB67AE8584CAA73BL, blockX, blockZ, 256.0f, 3, 0.50f);
         float tempNoise = fbm(seed ^ 0x3C6EF372FE94F82BL, blockX, blockZ, 1536.0f, 2, 0.60f);
         float moistureNoise = fbm(seed ^ 0xA54FF53A5F1D36F1L, blockX, blockZ, 768.0f, 3, 0.55f);
 
-        float seaLevel = world.getSeaLevel();
+        float seaLevel = level.getSeaLevel();
         float terrainHeightBlocks = seaLevel + largeScale * 48.0f + mediumScale * 14.0f;
-        float elevationNormalized = MathHelper.clamp((terrainHeightBlocks - seaLevel) / 96.0f, -1.0f, 1.0f);
-        float biomeTemperature = MathHelper.clamp(
+        float elevationNormalized = Mth.clamp((terrainHeightBlocks - seaLevel) / 96.0f, -1.0f, 1.0f);
+        float biomeTemperature = Mth.clamp(
             0.85f + tempNoise * 0.65f - Math.max(0.0f, elevationNormalized) * 0.45f,
             0.0f,
             2.0f
         );
-        float moisture = MathHelper.clamp(0.5f + moistureNoise * 0.5f, 0.0f, 1.0f);
+        float moisture = Mth.clamp(0.5f + moistureNoise * 0.5f, 0.0f, 1.0f);
 
         byte surfaceClass;
         float roughnessLengthMeters;
@@ -65,8 +65,8 @@ final class HashedSeedTerrainProvider implements SeedTerrainProvider {
     }
 
     private float valueNoise(long seed, float x, float z) {
-        int x0 = MathHelper.floor(x);
-        int z0 = MathHelper.floor(z);
+        int x0 = Mth.floor(x);
+        int z0 = Mth.floor(z);
         int x1 = x0 + 1;
         int z1 = z0 + 1;
         float tx = x - x0;
@@ -79,9 +79,9 @@ final class HashedSeedTerrainProvider implements SeedTerrainProvider {
         float n01 = hashToSignedUnit(seed, x0, z1);
         float n11 = hashToSignedUnit(seed, x1, z1);
 
-        float nx0 = MathHelper.lerp(sx, n00, n10);
-        float nx1 = MathHelper.lerp(sx, n01, n11);
-        return MathHelper.lerp(sz, nx0, nx1);
+        float nx0 = Mth.lerp(sx, n00, n10);
+        float nx1 = Mth.lerp(sx, n01, n11);
+        return Mth.lerp(sz, nx0, nx1);
     }
 
     private float smoothstep(float t) {

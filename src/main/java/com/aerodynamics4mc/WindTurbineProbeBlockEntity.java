@@ -4,12 +4,12 @@ import com.aerodynamics4mc.api.AeroWindApi;
 import com.aerodynamics4mc.api.GameplayWindSample;
 import com.aerodynamics4mc.api.SamplePolicy;
 
-import net.minecraft.block.BlockState;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.World;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.level.Level;
 
 public class WindTurbineProbeBlockEntity extends BlockEntity {
     private static final long SAMPLE_INTERVAL_TICKS = 20L;
@@ -26,31 +26,31 @@ public class WindTurbineProbeBlockEntity extends BlockEntity {
     private long lastSampleTick = -1L;
 
     public WindTurbineProbeBlockEntity(BlockPos pos, BlockState state) {
-        super(ModBlocks.WIND_TURBINE_PROBE_BLOCK_ENTITY, pos, state);
+        super(ModBlocks.WIND_TURBINE_PROBE_BLOCK_ENTITY.get(), pos, state);
     }
 
-    public static void tick(World world, BlockPos pos, BlockState state, WindTurbineProbeBlockEntity blockEntity) {
-        if (!(world instanceof ServerWorld serverWorld)) {
+    public static void tick(Level level, BlockPos pos, BlockState state, WindTurbineProbeBlockEntity blockEntity) {
+        if (!(level instanceof ServerLevel serverLevel)) {
             return;
         }
-        long time = serverWorld.getTime();
+        long time = serverLevel.getGameTime();
         if (Math.floorMod(time + pos.asLong(), SAMPLE_INTERVAL_TICKS) != 0L) {
             return;
         }
-        blockEntity.sampleNow(serverWorld, state);
+        blockEntity.sampleNow(serverLevel, state);
     }
 
-    public void sampleNow(ServerWorld world, BlockState state) {
-        Vec3d samplePos = new Vec3d(pos.getX() + 0.5, pos.getY() + 1.5, pos.getZ() + 0.5);
-        GameplayWindSample sample = AeroWindApi.sampleGameplay(world, samplePos, SamplePolicy.GAMEPLAY_SERVER_ONLY);
+    public void sampleNow(ServerLevel level, BlockState state) {
+        Vec3 samplePos = new Vec3(worldPosition.getX() + 0.5, worldPosition.getY() + 1.5, worldPosition.getZ() + 0.5);
+        GameplayWindSample sample = AeroWindApi.sampleGameplay(level, samplePos, SamplePolicy.GAMEPLAY_SERVER_ONLY);
         int previousPower = redstonePower;
         lastSample = sample;
-        lastSampleTick = world.getTime();
+        lastSampleTick = level.getGameTime();
         lastPowerWatts = sample.hasFlow() ? estimatePowerWatts(sample) : 0.0;
         redstonePower = redstoneFromPower(lastPowerWatts);
         if (redstonePower != previousPower) {
-            markDirty();
-            world.updateNeighborsAlways(pos, state.getBlock(), null);
+            setChanged();
+            level.updateNeighborsAt(worldPosition, state.getBlock());
         }
     }
 

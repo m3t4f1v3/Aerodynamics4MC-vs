@@ -4,11 +4,11 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.world.World;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.util.Mth;
+import net.minecraft.world.level.Level;
 
 final class BackgroundMetGrid {
     private static final float BASE_AIR_TEMPERATURE_K = 288.15f;
@@ -49,9 +49,9 @@ final class BackgroundMetGrid {
     private final int updateIntervalTicks;
     private final Map<Long, CellState> cells = new HashMap<>();
     private volatile ReadState readState = ReadState.EMPTY;
-    private ServerWorld currentWorld;
+    private ServerLevel currentLevel;
     private SeedTerrainProvider currentProvider;
-    private WorldScaleDriver currentDriver;
+    private LevelScaleDriver currentDriver;
     private int centerCellX;
     private int centerCellZ;
     private long lastRefreshTick = Long.MIN_VALUE;
@@ -69,15 +69,15 @@ final class BackgroundMetGrid {
     }
 
     synchronized void refresh(
-        ServerWorld world,
-        AeroServerRuntime.WorldEnvironmentSnapshot environmentSnapshot,
+        ServerLevel level,
+        AeroServerRuntime.LevelEnvironmentSnapshot environmentSnapshot,
         BlockPos focus,
         long tickCounter,
         float dtSeconds,
         SeedTerrainProvider provider,
-        WorldScaleDriver driver
+        LevelScaleDriver driver
     ) {
-        currentWorld = world;
+        currentLevel = level;
         currentProvider = provider;
         currentDriver = driver;
         int nextCenterCellX = Math.floorDiv(focus.getX(), cellSizeBlocks);
@@ -97,14 +97,14 @@ final class BackgroundMetGrid {
             currentRefreshTick = lastRefreshTick;
         }
 
-        long timeOfDay = environmentSnapshot == null ? world.getTimeOfDay() : environmentSnapshot.timeOfDay();
-        float rainGradient = environmentSnapshot == null ? world.getRainGradient(1.0f) : environmentSnapshot.rainGradient();
-        float thunderGradient = environmentSnapshot == null ? world.getThunderGradient(1.0f) : environmentSnapshot.thunderGradient();
+        long timeOfDay = environmentSnapshot == null ? level.getDayTime() : environmentSnapshot.timeOfDay();
+        float rainGradient = environmentSnapshot == null ? level.getRainLevel(1.0f) : environmentSnapshot.rainGradient();
+        float thunderGradient = environmentSnapshot == null ? level.getThunderLevel(1.0f) : environmentSnapshot.thunderGradient();
         currentRainGradient = rainGradient;
         currentThunderGradient = thunderGradient;
         float dayPhase = (float) Math.floorMod(timeOfDay, 24000L) / 24000.0f;
         currentSolarAltitude = Math.max(0.0f, (float) Math.sin(dayPhase * (float) (Math.PI * 2.0)));
-        currentClearSky = MathHelper.clamp(1.0f - 0.65f * rainGradient - 0.25f * thunderGradient, 0.15f, 1.0f);
+        currentClearSky = Mth.clamp(1.0f - 0.65f * rainGradient - 0.25f * thunderGradient, 0.15f, 1.0f);
 
         if (updateDue || centerChanged || readState.empty()) {
             ensureActiveCells();
@@ -252,7 +252,7 @@ final class BackgroundMetGrid {
     }
 
     private synchronized Sample sampleLocked(BlockPos pos) {
-        if (currentWorld == null || currentProvider == null) {
+        if (currentLevel == null || currentProvider == null) {
             return null;
         }
         int cellX = Math.floorDiv(pos.getX(), cellSizeBlocks);
@@ -262,7 +262,7 @@ final class BackgroundMetGrid {
     }
 
     private Sample sampleFromCell(CellState state, int cellX, int cellZ) {
-        WorldScaleTarget target = targetState(state, cellX, cellZ);
+        LevelScaleTarget target = targetState(state, cellX, cellZ);
         float backgroundWindX = finiteOrDefault(state.backgroundWindX, target.targetWindX);
         float backgroundWindZ = finiteOrDefault(state.backgroundWindZ, target.targetWindZ);
         float geostrophicWindX = finiteOrDefault(state.geostrophicWindX, backgroundWindX);
@@ -365,7 +365,7 @@ final class BackgroundMetGrid {
             temperatureAnomaly
         );
 
-        WorldScaleDriver.Snapshot driverSnapshot = currentDriver == null ? null : currentDriver.snapshot();
+        LevelScaleDriver.Snapshot driverSnapshot = currentDriver == null ? null : currentDriver.snapshot();
         return new Snapshot(
             gridWidth,
             cellSizeBlocks,
@@ -437,8 +437,8 @@ final class BackgroundMetGrid {
         }
     }
 
-    RegistryKey<World> worldKey(ServerWorld world) {
-        return world.getRegistryKey();
+    ResourceKey<Level> levelKey(ServerLevel level) {
+        return level.dimension();
     }
 
     private int cellCenterBlock(int cell) {
@@ -451,7 +451,7 @@ final class BackgroundMetGrid {
         if (cell == null) {
             int sampleX = cellCenterBlock(cellX);
             int sampleZ = cellCenterBlock(cellZ);
-            SeedTerrainProvider.TerrainSample terrain = currentProvider.sample(currentWorld, sampleX, sampleZ);
+            SeedTerrainProvider.TerrainSample terrain = currentProvider.sample(currentLevel, sampleX, sampleZ);
             cell = new CellState();
             cell.terrainHeightBlocks = terrain.terrainHeightBlocks();
             cell.biomeTemperature = terrain.biomeTemperature();
@@ -480,7 +480,7 @@ final class BackgroundMetGrid {
             CellState state = entry.getValue();
             int stateCellX = unpackX(entry.getKey());
             int stateCellZ = unpackZ(entry.getKey());
-            WorldScaleTarget target = targetState(state, stateCellX, stateCellZ);
+            LevelScaleTarget target = targetState(state, stateCellX, stateCellZ);
             previous.put(entry.getKey(), new StateSample(
                 finiteOrDefault(state.backgroundWindX, target.targetWindX),
                 finiteOrDefault(state.backgroundWindZ, target.targetWindZ),
@@ -492,14 +492,14 @@ final class BackgroundMetGrid {
         for (int cx = centerCellX - radiusCells; cx <= centerCellX + radiusCells; cx++) {
             for (int cz = centerCellZ - radiusCells; cz <= centerCellZ + radiusCells; cz++) {
                 CellState cell = ensureCell(cx, cz);
-                WorldScaleTarget target = targetState(cell, cx, cz);
+                LevelScaleTarget target = targetState(cell, cx, cz);
                 StateSample prev = sampleState(previous, cx, cz);
                 float backtraceX = cx - (prev.windX * currentDeltaSeconds) / cellSizeBlocks;
                 float backtraceZ = cz - (prev.windZ * currentDeltaSeconds) / cellSizeBlocks;
                 StateSample advected = sampleState(previous, backtraceX, backtraceZ);
                 StateSample neighborMean = sampleNeighborMean(previous, cx, cz);
 
-                float roughnessDrag = MathHelper.clamp(
+                float roughnessDrag = Mth.clamp(
                     currentDeltaSeconds * (BASE_ROUGHNESS_DRAG_PER_SECOND + cell.roughnessLengthMeters * ROUGHNESS_DRAG_SCALE_PER_SECOND),
                     0.0f,
                     MAX_ROUGHNESS_DRAG
@@ -513,30 +513,30 @@ final class BackgroundMetGrid {
                     currentDeltaSeconds,
                     PRESSURE_RELAXATION_PER_SECOND
                 );
-                nextPressure = MathHelper.clamp(nextPressure, -MAX_PRESSURE_ANOMALY_PA, MAX_PRESSURE_ANOMALY_PA);
+                nextPressure = Mth.clamp(nextPressure, -MAX_PRESSURE_ANOMALY_PA, MAX_PRESSURE_ANOMALY_PA);
                 PressureWind pressureWind = geostrophicWindFromPressure(previous, cx, cz);
                 float directWindBlend = directWindBlendForPressureWind(pressureWind);
-                float targetWindX = MathHelper.lerp(directWindBlend, pressureWind.windX(), target.targetWindX);
-                float targetWindZ = MathHelper.lerp(directWindBlend, pressureWind.windZ(), target.targetWindZ);
+                float targetWindX = Mth.lerp(directWindBlend, pressureWind.windX(), target.targetWindX);
+                float targetWindZ = Mth.lerp(directWindBlend, pressureWind.windZ(), target.targetWindZ);
                 WindVector terrainAdjustedWind = applyTerrainFormDrag(cx, cz, targetWindX, targetWindZ);
                 nextWindX = relax(nextWindX, terrainAdjustedWind.windX(), currentDeltaSeconds, FLOW_RELAXATION_PER_SECOND);
                 nextWindZ = relax(nextWindZ, terrainAdjustedWind.windZ(), currentDeltaSeconds, FLOW_RELAXATION_PER_SECOND);
                 nextWindX *= (1.0f - roughnessDrag);
                 nextWindZ *= (1.0f - roughnessDrag);
-                nextWindX = MathHelper.clamp(nextWindX, -MAX_DYNAMIC_WIND_MPS, MAX_DYNAMIC_WIND_MPS);
-                nextWindZ = MathHelper.clamp(nextWindZ, -MAX_DYNAMIC_WIND_MPS, MAX_DYNAMIC_WIND_MPS);
+                nextWindX = Mth.clamp(nextWindX, -MAX_DYNAMIC_WIND_MPS, MAX_DYNAMIC_WIND_MPS);
+                nextWindZ = Mth.clamp(nextWindZ, -MAX_DYNAMIC_WIND_MPS, MAX_DYNAMIC_WIND_MPS);
 
                 float nextAmbient = mix(advected.ambientAirTemperatureKelvin, neighborMean.ambientAirTemperatureKelvin, THERMAL_DIFFUSION_BLEND);
                 nextAmbient = relax(nextAmbient, target.targetAmbientAirTemperatureKelvin, currentDeltaSeconds, AIR_TEMPERATURE_RELAXATION_PER_SECOND);
 
                 float nextHumidity = mix(advected.humidity, neighborMean.humidity, HUMIDITY_DIFFUSION_BLEND);
                 float evaporationBoost = Math.max(0.0f, cell.surfaceTemperatureKelvin - nextAmbient) * EVAPORATION_SURFACE_DELTA_SCALE;
-                float humidityTarget = MathHelper.clamp(
+                float humidityTarget = Mth.clamp(
                     target.targetHumidity + evaporationBoost + currentRainGradient * 0.05f,
                     0.0f,
                     1.0f
                 );
-                nextHumidity = MathHelper.clamp(
+                nextHumidity = Mth.clamp(
                     relax(nextHumidity, humidityTarget, currentDeltaSeconds, HUMIDITY_RELAXATION_PER_SECOND),
                     0.0f,
                     1.0f
@@ -579,7 +579,7 @@ final class BackgroundMetGrid {
     }
 
     private void seedDynamicState(CellState cell, int cellX, int cellZ) {
-        WorldScaleTarget target = targetState(cell, cellX, cellZ);
+        LevelScaleTarget target = targetState(cell, cellX, cellZ);
         if (!Float.isFinite(cell.ambientAirTemperatureKelvin) || cell.ambientAirTemperatureKelvin <= 0.0f) {
             cell.ambientAirTemperatureKelvin = target.targetAmbientAirTemperatureKelvin;
         }
@@ -631,7 +631,7 @@ final class BackgroundMetGrid {
                 + north.pressureAnomalyPa
                 + south.pressureAnomalyPa) / 5.0f,
             (center.ambientAirTemperatureKelvin + west.ambientAirTemperatureKelvin + east.ambientAirTemperatureKelvin + north.ambientAirTemperatureKelvin + south.ambientAirTemperatureKelvin) / 5.0f,
-            MathHelper.clamp(
+            Mth.clamp(
                 (center.humidity + west.humidity + east.humidity + north.humidity + south.humidity) / 5.0f,
                 0.0f,
                 1.0f
@@ -640,8 +640,8 @@ final class BackgroundMetGrid {
     }
 
     private StateSample sampleState(Map<Long, StateSample> previous, float cellX, float cellZ) {
-        int x0 = MathHelper.floor(cellX);
-        int z0 = MathHelper.floor(cellZ);
+        int x0 = Mth.floor(cellX);
+        int z0 = Mth.floor(cellZ);
         int x1 = x0 + 1;
         int z1 = z0 + 1;
         float tx = cellX - x0;
@@ -652,22 +652,22 @@ final class BackgroundMetGrid {
         StateSample s01 = stateAt(previous, x0, z1);
         StateSample s11 = stateAt(previous, x1, z1);
 
-        float windX0 = MathHelper.lerp(tx, s00.windX, s10.windX);
-        float windX1 = MathHelper.lerp(tx, s01.windX, s11.windX);
-        float windZ0 = MathHelper.lerp(tx, s00.windZ, s10.windZ);
-        float windZ1 = MathHelper.lerp(tx, s01.windZ, s11.windZ);
-        float pressure0 = MathHelper.lerp(tx, s00.pressureAnomalyPa, s10.pressureAnomalyPa);
-        float pressure1 = MathHelper.lerp(tx, s01.pressureAnomalyPa, s11.pressureAnomalyPa);
-        float temp0 = MathHelper.lerp(tx, s00.ambientAirTemperatureKelvin, s10.ambientAirTemperatureKelvin);
-        float temp1 = MathHelper.lerp(tx, s01.ambientAirTemperatureKelvin, s11.ambientAirTemperatureKelvin);
-        float humidity0 = MathHelper.lerp(tx, s00.humidity, s10.humidity);
-        float humidity1 = MathHelper.lerp(tx, s01.humidity, s11.humidity);
+        float windX0 = Mth.lerp(tx, s00.windX, s10.windX);
+        float windX1 = Mth.lerp(tx, s01.windX, s11.windX);
+        float windZ0 = Mth.lerp(tx, s00.windZ, s10.windZ);
+        float windZ1 = Mth.lerp(tx, s01.windZ, s11.windZ);
+        float pressure0 = Mth.lerp(tx, s00.pressureAnomalyPa, s10.pressureAnomalyPa);
+        float pressure1 = Mth.lerp(tx, s01.pressureAnomalyPa, s11.pressureAnomalyPa);
+        float temp0 = Mth.lerp(tx, s00.ambientAirTemperatureKelvin, s10.ambientAirTemperatureKelvin);
+        float temp1 = Mth.lerp(tx, s01.ambientAirTemperatureKelvin, s11.ambientAirTemperatureKelvin);
+        float humidity0 = Mth.lerp(tx, s00.humidity, s10.humidity);
+        float humidity1 = Mth.lerp(tx, s01.humidity, s11.humidity);
         return new StateSample(
-            MathHelper.lerp(tz, windX0, windX1),
-            MathHelper.lerp(tz, windZ0, windZ1),
-            MathHelper.clamp(MathHelper.lerp(tz, pressure0, pressure1), -MAX_PRESSURE_ANOMALY_PA, MAX_PRESSURE_ANOMALY_PA),
-            MathHelper.lerp(tz, temp0, temp1),
-            MathHelper.clamp(MathHelper.lerp(tz, humidity0, humidity1), 0.0f, 1.0f)
+            Mth.lerp(tz, windX0, windX1),
+            Mth.lerp(tz, windZ0, windZ1),
+            Mth.clamp(Mth.lerp(tz, pressure0, pressure1), -MAX_PRESSURE_ANOMALY_PA, MAX_PRESSURE_ANOMALY_PA),
+            Mth.lerp(tz, temp0, temp1),
+            Mth.clamp(Mth.lerp(tz, humidity0, humidity1), 0.0f, 1.0f)
         );
     }
 
@@ -677,7 +677,7 @@ final class BackgroundMetGrid {
             return sample;
         }
         CellState cell = ensureCell(cellX, cellZ);
-        WorldScaleTarget target = targetState(cell, cellX, cellZ);
+        LevelScaleTarget target = targetState(cell, cellX, cellZ);
         return new StateSample(
             target.targetWindX,
             target.targetWindZ,
@@ -687,13 +687,13 @@ final class BackgroundMetGrid {
         );
     }
 
-    private WorldScaleTarget targetState(CellState cell, int cellX, int cellZ) {
+    private LevelScaleTarget targetState(CellState cell, int cellX, int cellZ) {
         float baseAmbient = BASE_AIR_TEMPERATURE_K
             + (cell.biomeTemperature - 0.8f) * BIOME_TEMPERATURE_SCALE_K
-            - Math.max(0.0f, cell.terrainHeightBlocks - currentWorld.getSeaLevel()) * ALTITUDE_LAPSE_RATE_K_PER_BLOCK;
-        WorldScaleDriver.Sample driverSample = currentDriver == null ? null : currentDriver.sample(cellX, cellZ);
-        float fallbackWindX = prevailingWindComponent(currentWorld.getSeed(), cellX, cellZ, 0x517cc1b727220a95L);
-        float fallbackWindZ = prevailingWindComponent(currentWorld.getSeed(), cellX, cellZ, 0x9e3779b97f4a7c15L);
+            - Math.max(0.0f, cell.terrainHeightBlocks - currentLevel.getSeaLevel()) * ALTITUDE_LAPSE_RATE_K_PER_BLOCK;
+        LevelScaleDriver.Sample driverSample = currentDriver == null ? null : currentDriver.sample(cellX, cellZ);
+        float fallbackWindX = prevailingWindComponent(currentLevel.getSeed(), cellX, cellZ, 0x517cc1b727220a95L);
+        float fallbackWindZ = prevailingWindComponent(currentLevel.getSeed(), cellX, cellZ, 0x9e3779b97f4a7c15L);
         float targetWindX = finiteClamp(
             driverSample != null ? driverSample.targetWindX() : fallbackWindX,
             -MAX_DRIVER_WIND_MPS,
@@ -721,7 +721,7 @@ final class BackgroundMetGrid {
             1.0f,
             0.50f
         );
-        return new WorldScaleTarget(
+        return new LevelScaleTarget(
             targetWindX,
             targetWindZ,
             targetPressureAnomalyPa,
@@ -742,7 +742,7 @@ final class BackgroundMetGrid {
 
     private WindVector applyTerrainFormDrag(int cellX, int cellZ, float windX, float windZ) {
         float speedSquared = windX * windX + windZ * windZ;
-        if (speedSquared <= 1.0e-5f || currentProvider == null || currentWorld == null) {
+        if (speedSquared <= 1.0e-5f || currentProvider == null || currentLevel == null) {
             return new WindVector(windX, windZ);
         }
 
@@ -757,13 +757,13 @@ final class BackgroundMetGrid {
             return new WindVector(windX, windZ);
         }
 
-        float speed = MathHelper.sqrt(speedSquared);
+        float speed = Mth.sqrt(speedSquared);
         float invSpeed = 1.0f / Math.max(1.0e-3f, speed);
-        float invSlope = 1.0f / Math.max(1.0e-3f, MathHelper.sqrt(slopeSquared));
+        float invSlope = 1.0f / Math.max(1.0e-3f, Mth.sqrt(slopeSquared));
         float unitWindX = windX * invSpeed;
         float unitWindZ = windZ * invSpeed;
         float uphillComponent = unitWindX * slopeX + unitWindZ * slopeZ;
-        float uphillDrag = MathHelper.clamp(
+        float uphillDrag = Mth.clamp(
             Math.max(0.0f, uphillComponent) * TERRAIN_FORM_DRAG_SCALE,
             0.0f,
             MAX_TERRAIN_WIND_ADJUSTMENT
@@ -775,7 +775,7 @@ final class BackgroundMetGrid {
         float contourZ = slopeX * invSlope;
         float contourAlignment = windX * contourX + windZ * contourZ;
         float contourSign = contourAlignment >= 0.0f ? 1.0f : -1.0f;
-        float deflection = MathHelper.clamp(
+        float deflection = Mth.clamp(
             Math.abs(uphillComponent) * TERRAIN_FLOW_DEFLECTION_SCALE,
             0.0f,
             MAX_TERRAIN_WIND_ADJUSTMENT
@@ -783,7 +783,7 @@ final class BackgroundMetGrid {
         adjustedWindX += contourX * contourSign * deflection;
         adjustedWindZ += contourZ * contourSign * deflection;
 
-        float adjustedSpeed = MathHelper.sqrt(adjustedWindX * adjustedWindX + adjustedWindZ * adjustedWindZ);
+        float adjustedSpeed = Mth.sqrt(adjustedWindX * adjustedWindX + adjustedWindZ * adjustedWindZ);
         float maxAdjustedSpeed = Math.max(0.1f, speed * 1.15f);
         if (adjustedSpeed > maxAdjustedSpeed) {
             float scale = maxAdjustedSpeed / adjustedSpeed;
@@ -802,13 +802,13 @@ final class BackgroundMetGrid {
             return existing.terrainHeightBlocks;
         }
         SeedTerrainProvider.TerrainSample terrain = currentProvider.sample(
-            currentWorld,
+            currentLevel,
             cellCenterBlock(cellX),
             cellCenterBlock(cellZ)
         );
         return Float.isFinite(terrain.terrainHeightBlocks())
             ? terrain.terrainHeightBlocks()
-            : currentWorld.getSeaLevel();
+            : currentLevel.getSeaLevel();
     }
 
     private PressureWind geostrophicWindFromPressure(Map<Long, StateSample> previous, int cellX, int cellZ) {
@@ -836,15 +836,15 @@ final class BackgroundMetGrid {
         if (pressureWindSpeed >= GEOSTROPHIC_FALLBACK_SPEED_MPS) {
             return GEOSTROPHIC_DIRECT_WIND_BLEND;
         }
-        float fallbackWeight = 1.0f - MathHelper.clamp(pressureWindSpeed / GEOSTROPHIC_FALLBACK_SPEED_MPS, 0.0f, 1.0f);
-        return MathHelper.lerp(fallbackWeight, GEOSTROPHIC_DIRECT_WIND_BLEND, GEOSTROPHIC_FALLBACK_WIND_BLEND);
+        float fallbackWeight = 1.0f - Mth.clamp(pressureWindSpeed / GEOSTROPHIC_FALLBACK_SPEED_MPS, 0.0f, 1.0f);
+        return Mth.lerp(fallbackWeight, GEOSTROPHIC_DIRECT_WIND_BLEND, GEOSTROPHIC_FALLBACK_WIND_BLEND);
     }
 
     private float windSpeed(float windX, float windZ) {
         if (!Float.isFinite(windX) || !Float.isFinite(windZ)) {
             return 0.0f;
         }
-        return MathHelper.sqrt(windX * windX + windZ * windZ);
+        return Mth.sqrt(windX * windX + windZ * windZ);
     }
 
     private float pseudoCoriolisFactor(int cellZ) {
@@ -853,7 +853,7 @@ final class BackgroundMetGrid {
         if (wrapped < 0.0f) {
             wrapped += periodCells;
         }
-        return MathHelper.clamp((wrapped - periodCells * 0.5f) / (periodCells * 0.5f), -1.0f, 1.0f);
+        return Mth.clamp((wrapped - periodCells * 0.5f) / (periodCells * 0.5f), -1.0f, 1.0f);
     }
 
     private float relax(float current, float target, float deltaSeconds) {
@@ -861,8 +861,8 @@ final class BackgroundMetGrid {
         if (!Float.isFinite(current) || current <= 0.0f) {
             return safeTarget;
         }
-        float alpha = MathHelper.clamp(deltaSeconds * SURFACE_RELAXATION_PER_SECOND, 0.0f, 1.0f);
-        return MathHelper.lerp(alpha, current, safeTarget);
+        float alpha = Mth.clamp(deltaSeconds * SURFACE_RELAXATION_PER_SECOND, 0.0f, 1.0f);
+        return Mth.lerp(alpha, current, safeTarget);
     }
 
     private float relax(float current, float target, float deltaSeconds, float ratePerSecond) {
@@ -870,12 +870,12 @@ final class BackgroundMetGrid {
         if (!Float.isFinite(current)) {
             return safeTarget;
         }
-        float alpha = MathHelper.clamp(deltaSeconds * ratePerSecond, 0.0f, 1.0f);
-        return MathHelper.lerp(alpha, current, safeTarget);
+        float alpha = Mth.clamp(deltaSeconds * ratePerSecond, 0.0f, 1.0f);
+        return Mth.lerp(alpha, current, safeTarget);
     }
 
     private float mix(float a, float b, float t) {
-        return MathHelper.lerp(MathHelper.clamp(t, 0.0f, 1.0f), a, b);
+        return Mth.lerp(Mth.clamp(t, 0.0f, 1.0f), a, b);
     }
 
     private float finiteOrDefault(float value, float fallback) {
@@ -887,9 +887,9 @@ final class BackgroundMetGrid {
 
     private float finiteClamp(float value, float min, float max, float fallback) {
         if (Float.isFinite(value)) {
-            return MathHelper.clamp(value, min, max);
+            return Mth.clamp(value, min, max);
         }
-        return MathHelper.clamp(finiteOrDefault(fallback, min), min, max);
+        return Mth.clamp(finiteOrDefault(fallback, min), min, max);
     }
 
     private float prevailingWindComponent(long seed, int x, int z, long salt) {
@@ -1087,7 +1087,7 @@ final class BackgroundMetGrid {
         float clearSky,
         float rainGradient,
         float thunderGradient,
-        WorldScaleDriver.Snapshot driver,
+        LevelScaleDriver.Snapshot driver,
         float[] terrainHeightBlocks,
         float[] biomeTemperature,
         float[] roughnessLengthMeters,
@@ -1147,7 +1147,7 @@ final class BackgroundMetGrid {
     ) {
     }
 
-    private record WorldScaleTarget(
+    private record LevelScaleTarget(
         float targetWindX,
         float targetWindZ,
         float targetPressureAnomalyPa,

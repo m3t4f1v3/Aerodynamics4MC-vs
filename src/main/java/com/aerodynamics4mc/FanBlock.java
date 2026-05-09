@@ -1,55 +1,48 @@
 package com.aerodynamics4mc;
 
-import com.mojang.serialization.MapCodec;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.StateDefinition;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.EnumProperty;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockRenderType;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.BlockWithEntity;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.item.ItemPlacementContext;
-import net.minecraft.state.StateManager;
-import net.minecraft.state.property.EnumProperty;
-import net.minecraft.state.property.Properties;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
+public class FanBlock extends BaseEntityBlock {
+    public static final EnumProperty<Direction> FACING = BlockStateProperties.FACING;
 
-public class FanBlock extends BlockWithEntity {
-    public static final MapCodec<FanBlock> CODEC = createCodec(FanBlock::new);
-    public static final EnumProperty<Direction> FACING = Properties.FACING;
-
-    public FanBlock(Settings settings) {
+    public FanBlock(Properties settings) {
         super(settings);
-        setDefaultState(getStateManager().getDefaultState().with(FACING, Direction.NORTH));
+        registerDefaultState(getStateDefinition().any().setValue(FACING, Direction.NORTH));
     }
 
     public FanBlock() {
-        this(Settings.create().strength(1.5f));
+        this(BlockBehaviour.Properties.of().strength(1.5f));
     }
 
     @Override
-    protected MapCodec<? extends BlockWithEntity> getCodec() {
-        return CODEC;
-    }
-
-    @Override
-    public BlockEntity createBlockEntity(BlockPos pos, BlockState state) {
+    public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
         return new FanBlockEntity(pos, state);
     }
 
     @Override
-    public BlockState getPlacementState(ItemPlacementContext ctx) {
-        Direction facing = ctx.getPlayerLookDirection();
-        return getDefaultState().with(FACING, facing);
+    public BlockState getStateForPlacement(BlockPlaceContext ctx) {
+        Direction facing = ctx.getNearestLookingDirection();
+        return defaultBlockState().setValue(FACING, facing);
     }
 
     @Override
-    public BlockRenderType getRenderType(BlockState state) {
-        return BlockRenderType.MODEL;
+    public RenderShape getRenderShape(BlockState state) {
+        return RenderShape.MODEL;
     }
 
     @Override
-    protected void appendProperties(StateManager.Builder<Block, BlockState> builder) {
+    protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
         builder.add(FACING);
     }
 }

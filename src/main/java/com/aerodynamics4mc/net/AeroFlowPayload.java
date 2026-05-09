@@ -1,78 +1,36 @@
 package com.aerodynamics4mc.net;
 
-import com.aerodynamics4mc.ModBlocks;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.BlockPos;
 
-import net.minecraft.network.RegistryByteBuf;
-import net.minecraft.network.codec.PacketCodec;
-import net.minecraft.network.packet.CustomPayload;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
+public class AeroFlowPayload {
+    private static final int MAX_PACKED_SHORTS = 1_048_576;
+    private static final int MAX_BYTES = 4_194_304;
 
-public record AeroFlowPayload(
-    Identifier dimensionId,
-    BlockPos origin,
-    int sampleStride,
-    short[] packedFlow,
-    byte[] packedFlowBytes
-) implements CustomPayload {
-    private static final int MAX_PACKED_FLOW_SHORTS = 1_048_576;
+    public final ResourceLocation dimensionId;
+    public final BlockPos origin;
+    public final int sampleStride;
+    public final short[] packedFlow;
+    public final byte[] packedFlowBytes;
 
-    public static final CustomPayload.Id<AeroFlowPayload> ID =
-        new CustomPayload.Id<>(Identifier.of(ModBlocks.MOD_ID, "flow_field"));
-    public static final PacketCodec<RegistryByteBuf, AeroFlowPayload> CODEC =
-        PacketCodec.of(AeroFlowPayload::write, AeroFlowPayload::new);
-
-    public AeroFlowPayload {
-        if (packedFlow == null) {
-            packedFlow = new short[0];
-        }
-        if (packedFlow.length > MAX_PACKED_FLOW_SHORTS) {
-            throw new IllegalArgumentException("Invalid flow payload length: " + packedFlow.length);
-        }
-        if (packedFlowBytes == null || packedFlowBytes.length != packedFlow.length * Short.BYTES) {
-            packedFlowBytes = encodePackedFlow(packedFlow);
-        }
+    public AeroFlowPayload(ResourceLocation dimensionId, BlockPos origin, int sampleStride, short[] packedFlow, byte[] packedFlowBytes) {
+        this.dimensionId = dimensionId; this.origin = origin; this.sampleStride = sampleStride; this.packedFlow = packedFlow; this.packedFlowBytes = packedFlowBytes;
     }
 
-    public AeroFlowPayload(Identifier dimensionId, BlockPos origin, int sampleStride, short[] packedFlow) {
-        this(dimensionId, origin, sampleStride, packedFlow, encodePackedFlow(packedFlow));
+    public AeroFlowPayload(FriendlyByteBuf buf) {
+        this(buf.readResourceLocation(), buf.readBlockPos(), buf.readVarInt(), readShortArray(buf), buf.readByteArray(MAX_BYTES));
     }
 
-    public static AeroFlowPayload fromPackedBytes(
-        Identifier dimensionId,
-        BlockPos origin,
-        int sampleStride,
-        short[] packedFlow,
-        byte[] packedFlowBytes
-    ) {
+    public static AeroFlowPayload fromPackedBytes(ResourceLocation dimensionId, BlockPos origin, int sampleStride, short[] packedFlow, byte[] packedFlowBytes) {
         return new AeroFlowPayload(dimensionId, origin, sampleStride, packedFlow, packedFlowBytes);
     }
 
-    private AeroFlowPayload(RegistryByteBuf buf) {
-        this(buf.readIdentifier(), buf.readBlockPos(), buf.readVarInt(), readPackedFlowBytes(buf));
-    }
-
-    private AeroFlowPayload(Identifier dimensionId, BlockPos origin, int sampleStride, byte[] packedFlowBytes) {
-        this(dimensionId, origin, sampleStride, decodePackedFlow(packedFlowBytes), packedFlowBytes);
-    }
-
-    private static byte[] readPackedFlowBytes(RegistryByteBuf buf) {
-        int length = buf.readVarInt();
-        if (length < 0 || length > MAX_PACKED_FLOW_SHORTS) {
-            throw new IllegalArgumentException("Invalid flow payload length: " + length);
-        }
-        byte[] data = new byte[length * Short.BYTES];
-        buf.readBytes(data);
-        return data;
-    }
-
     public static byte[] encodePackedFlow(short[] packedFlow) {
-        if (packedFlow == null) {
-            return new byte[0];
-        }
-        byte[] bytes = new byte[packedFlow.length * Short.BYTES];
-        for (int i = 0; i < packedFlow.length; i++) {
-            short value = packedFlow[i];
+        short[] safePackedFlow = packedFlow == null ? new short[0] : packedFlow;
+        byte[] bytes = new byte[safePackedFlow.length * Short.BYTES];
+        for (int i = 0; i < safePackedFlow.length; i++) {
+            short value = safePackedFlow[i];
             int base = i * Short.BYTES;
             bytes[base] = (byte) ((value >>> 8) & 0xFF);
             bytes[base + 1] = (byte) (value & 0xFF);
@@ -80,35 +38,7 @@ public record AeroFlowPayload(
         return bytes;
     }
 
-    private static short[] decodePackedFlow(byte[] packedFlowBytes) {
-        if (packedFlowBytes == null || packedFlowBytes.length == 0) {
-            return new short[0];
-        }
-        if ((packedFlowBytes.length & 1) != 0) {
-            throw new IllegalArgumentException("Invalid packed flow byte length: " + packedFlowBytes.length);
-        }
-        int length = packedFlowBytes.length / Short.BYTES;
-        if (length > MAX_PACKED_FLOW_SHORTS) {
-            throw new IllegalArgumentException("Invalid flow payload length: " + length);
-        }
-        short[] data = new short[length];
-        for (int i = 0; i < length; i++) {
-            int base = i * Short.BYTES;
-            data[i] = (short) (((packedFlowBytes[base] & 0xFF) << 8) | (packedFlowBytes[base + 1] & 0xFF));
-        }
-        return data;
-    }
+    private static short[] readShortArray(FriendlyByteBuf buf) { int length = buf.readVarInt(); if (length < 0 || length > MAX_PACKED_SHORTS) throw new IllegalArgumentException("Invalid array length: " + length); short[] data = new short[length]; for (int i = 0; i < length; i++) data[i] = buf.readShort(); return data; }
 
-    private void write(RegistryByteBuf buf) {
-        buf.writeIdentifier(dimensionId);
-        buf.writeBlockPos(origin);
-        buf.writeVarInt(sampleStride);
-        buf.writeVarInt(packedFlow.length);
-        buf.writeBytes(packedFlowBytes);
-    }
-
-    @Override
-    public Id<? extends CustomPayload> getId() {
-        return ID;
-    }
+    public void toBytes(FriendlyByteBuf buf) { buf.writeResourceLocation(dimensionId); buf.writeBlockPos(origin); buf.writeVarInt(sampleStride); buf.writeVarInt(packedFlow.length); for (short value : packedFlow) buf.writeShort(value); buf.writeByteArray(packedFlowBytes); }
 }

@@ -1,6 +1,6 @@
 package com.aerodynamics4mc.api;
 
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.phys.Vec3;
 
 public record GameplayWindSample(
     float meanX,
@@ -22,7 +22,7 @@ public record GameplayWindSample(
     AeroWindSample.Level sourceLevel,
     AeroWindSample.Authority authority,
     long l1Epoch,
-    long worldDeltaEpoch,
+    long LevelDeltaEpoch,
     long l2Epoch
 ) {
     private static final float MAX_MEAN_SPEED_MPS = 12.0f;
@@ -160,21 +160,21 @@ public record GameplayWindSample(
             primary.sourceLevel(),
             primary.authority(),
             latestKnownEpoch(safeRaw.l1Epoch(), reference.l1Epoch()),
-            latestKnownEpoch(safeRaw.worldDeltaEpoch(), reference.worldDeltaEpoch()),
+            latestKnownEpoch(safeRaw.LevelDeltaEpoch(), reference.LevelDeltaEpoch()),
             latestKnownEpoch(safeRaw.l2Epoch(), reference.l2Epoch())
         );
     }
 
-    public Vec3d meanVelocity() {
-        return new Vec3d(meanX, meanY, meanZ);
+    public Vec3 meanVelocity() {
+        return new Vec3(meanX, meanY, meanZ);
     }
 
-    public Vec3d gustVelocity() {
-        return new Vec3d(gustX, gustY, gustZ);
+    public Vec3 gustVelocity() {
+        return new Vec3(gustX, gustY, gustZ);
     }
 
-    public Vec3d effectiveVelocity() {
-        return new Vec3d(meanX + gustX, meanY + gustY, meanZ + gustZ);
+    public Vec3 effectiveVelocity() {
+        return new Vec3(meanX + gustX, meanY + gustY, meanZ + gustZ);
     }
 
     public float meanSpeedMetersPerSecond() {

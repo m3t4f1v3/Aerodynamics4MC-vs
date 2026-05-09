@@ -1,14 +1,14 @@
 package com.aerodynamics4mc.mixin.client;
 
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.particle.Particle;
-import net.minecraft.client.world.ClientWorld;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
 @Mixin(Particle.class)
 public interface ParticleAccessor {
-    @Accessor("world")
-    ClientWorld a4mc$getWorld();
+    @Accessor("level")
+    ClientLevel a4mc$getLevel();
 
     @Accessor("x")
     double a4mc$getX();
@@ -19,21 +19,21 @@ public interface ParticleAccessor {
     @Accessor("z")
     double a4mc$getZ();
 
-    @Accessor("velocityX")
+    @Accessor("xd")
     double a4mc$getVelocityX();
 
-    @Accessor("velocityY")
+    @Accessor("yd")
     double a4mc$getVelocityY();
 
-    @Accessor("velocityZ")
+    @Accessor("zd")
     double a4mc$getVelocityZ();
 
-    @Accessor("velocityX")
+    @Accessor("xd")
     void a4mc$setVelocityX(double value);
 
-    @Accessor("velocityY")
+    @Accessor("yd")
     void a4mc$setVelocityY(double value);
 
-    @Accessor("velocityZ")
+    @Accessor("zd")
     void a4mc$setVelocityZ(double value);
 }

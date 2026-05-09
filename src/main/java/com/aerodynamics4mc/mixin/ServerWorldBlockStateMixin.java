@@ -10,19 +10,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import com.aerodynamics4mc.runtime.AeroServerRuntime;
 
-import net.minecraft.block.BlockState;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 
-@Mixin(World.class)
-abstract class ServerWorldBlockStateMixin {
+@Mixin(Level.class)
+abstract class ServerLevelBlockStateMixin {
     @Unique
     private static final ThreadLocal<ArrayDeque<ChangeContext>> A4MC_BLOCK_CHANGE_STACK =
         ThreadLocal.withInitial(ArrayDeque::new);
 
     @Inject(
-        method = "setBlockState(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/BlockState;II)Z",
+        method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z",
         at = @At("HEAD")
     )
     private void a4mc$captureOldState(
@@ -32,14 +32,14 @@ abstract class ServerWorldBlockStateMixin {
         int maxUpdateDepth,
         CallbackInfoReturnable<Boolean> cir
     ) {
-        if (!((Object) this instanceof ServerWorld world)) {
+        if (!((Object) this instanceof ServerLevel level)) {
             return;
         }
-        A4MC_BLOCK_CHANGE_STACK.get().push(new ChangeContext(pos.toImmutable(), world.getBlockState(pos)));
+        A4MC_BLOCK_CHANGE_STACK.get().push(new ChangeContext(pos.immutable(), level.getBlockState(pos)));
     }
 
     @Inject(
-        method = "setBlockState(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/BlockState;II)Z",
+        method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z",
         at = @At("RETURN")
     )
     private void a4mc$notifyBlockChange(
@@ -57,10 +57,10 @@ abstract class ServerWorldBlockStateMixin {
         if (context == null || !cir.getReturnValueZ()) {
             return;
         }
-        if (!((Object) this instanceof ServerWorld world)) {
+        if (!((Object) this instanceof ServerLevel level)) {
             return;
         }
-        AeroServerRuntime.notifyBlockStateChanged(world, context.pos(), context.oldState(), world.getBlockState(context.pos()));
+        AeroServerRuntime.notifyBlockStateChanged(level, context.pos(), context.oldState(), level.getBlockState(context.pos()));
     }
 
     @Unique

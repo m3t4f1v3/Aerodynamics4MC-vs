@@ -13,22 +13,21 @@ import com.aerodynamics4mc.net.AeroCoarseWindPayload;
 import com.aerodynamics4mc.net.AeroFlowAnalysisPayload;
 import com.aerodynamics4mc.net.AeroFlowPayload;
 import com.aerodynamics4mc.runtime.NativeSimulationBridge;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
 
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.DrawStyle;
-import net.minecraft.client.render.RenderLayers;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.debug.gizmo.GizmoDrawing;
+import net.minecraftforge.client.event.RenderLevelStageEvent;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.util.Mth;
+import net.minecraft.world.phys.Vec3;
 
 final class AeroVisualizer {
     private static final float ATLAS_VELOCITY_RANGE = 5.6f;
@@ -73,17 +72,32 @@ final class AeroVisualizer {
     private long clientTickCounter;
 
     void initialize() {
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> clearState());
-        ClientTickEvents.END_CLIENT_TICK.register(client -> onClientTick());
-        WorldRenderEvents.BEFORE_DEBUG_RENDER.register(this::renderAtlasOverlay);
+        MinecraftForge.EVENT_BUS.register(this);
     }
 
     void onRuntimeState(AeroFlowState state) {
-        streamingEnabled = state.streamingEnabled();
+        this.streamingEnabled = state.streamingEnabled();
+        this.renderVelocityVectors = state.renderVelocityVectors();
+        this.renderStreamlines = state.renderStreamlines();
         if (!streamingEnabled) {
             remoteWindows.clear();
             localWindows.clear();
             coarseWindFields.clear();
+            analysisWindows.clear();
+        }
+    }
+
+    @SubscribeEvent
+    public void onClientTickEvent(TickEvent.ClientTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            onClientTick();
+        }
+    }
+
+    @SubscribeEvent
+    public void onRenderLevel(RenderLevelStageEvent event) {
+        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES) {
+            renderAtlasOverlayInternal(event);
         }
     }
 
@@ -91,11 +105,11 @@ final class AeroVisualizer {
         if (!streamingEnabled) {
             return;
         }
-        WindowKey key = new WindowKey(payload.dimensionId(), payload.origin());
+        WindowKey key = new WindowKey(payload.dimensionId, payload.origin);
         remoteWindows.put(key, RemoteFlowField.fromPayload(payload, clientTickCounter));
     }
 
-    void onLocalFlowField(Identifier dimensionId, BlockPos origin, int sampleStride, short[] packedFlow) {
+    void onLocalFlowField(ResourceLocation dimensionId, BlockPos origin, int sampleStride, short[] packedFlow) {
         if (!streamingEnabled || packedFlow == null || packedFlow.length == 0) {
             return;
         }
@@ -126,7 +140,7 @@ final class AeroVisualizer {
         if (!streamingEnabled) {
             return;
         }
-        WindowKey key = new WindowKey(payload.dimensionId(), payload.origin());
+        WindowKey key = new WindowKey(payload.dimensionId, payload.origin);
         coarseWindFields.put(key, CoarseWindField.fromPayload(payload, clientTickCounter));
     }
 
@@ -138,13 +152,13 @@ final class AeroVisualizer {
         if (flowState == null) {
             return;
         }
-        WindowKey key = new WindowKey(payload.dimensionId(), payload.origin());
+        WindowKey key = new WindowKey(payload.dimensionId, payload.origin);
         analysisWindows.put(
             key,
             new AnalysisFlowField(
-                payload.dimensionId(),
-                payload.origin(),
-                payload.fullResolution(),
+                payload.dimensionId,
+                payload.origin,
+                payload.fullResolution,
                 flowState,
                 clientTickCounter
             )
@@ -175,11 +189,11 @@ final class AeroVisualizer {
         return renderStreamlines;
     }
 
-    AeroWindSample sampleFlow(Identifier dimensionId, Vec3d position) {
+    AeroWindSample sampleFlow(ResourceLocation dimensionId, Vec3 position) {
         return sampleFlow(dimensionId, position, SamplePolicy.SERVER_AGGREGATED_PREFERRED);
     }
 
-    AeroWindSample sampleFlow(Identifier dimensionId, Vec3d position, SamplePolicy policy) {
+    AeroWindSample sampleFlow(ResourceLocation dimensionId, Vec3 position, SamplePolicy policy) {
         if (!streamingEnabled) {
             return AeroWindSample.ZERO;
         }
@@ -208,17 +222,17 @@ final class AeroVisualizer {
 
     private SamplePolicy effectiveSamplePolicyForLocalPlayer(SamplePolicy policy) {
         SamplePolicy effectivePolicy = policy == null ? SamplePolicy.SERVER_AGGREGATED_PREFERRED : policy;
-        MinecraftClient client = MinecraftClient.getInstance();
+        Minecraft client = Minecraft.getInstance();
         if (effectivePolicy != SamplePolicy.DIAGNOSTIC_ALL_SOURCES
             && client != null
             && client.player != null
-            && AeroWindSamplingRules.isFastPlayerVelocity(client.player.getVelocity())) {
+            && AeroWindSamplingRules.isFastPlayerVelocity(client.player.getDeltaMovement())) {
             return SamplePolicy.SERVER_COARSE_ONLY;
         }
         return effectivePolicy;
     }
 
-    AeroWindSample sampleServerCoarseFlow(Identifier dimensionId, Vec3d position) {
+    AeroWindSample sampleServerCoarseFlow(ResourceLocation dimensionId, Vec3 position) {
         if (!streamingEnabled) {
             return AeroWindSample.ZERO;
         }
@@ -226,15 +240,15 @@ final class AeroVisualizer {
         return coarseField == null ? AeroWindSample.ZERO : coarseField.sampleFlowTrilinear(position);
     }
 
-    Vec3d sampleWind(Identifier dimensionId, Vec3d position) {
+    Vec3 sampleWind(ResourceLocation dimensionId, Vec3 position) {
         return sampleFlow(dimensionId, position).velocity();
     }
 
-    private RemoteFlowField findNewestRemoteField(Identifier dimensionId, Vec3d position) {
+    private RemoteFlowField findNewestRemoteField(ResourceLocation dimensionId, Vec3 position) {
         return findNewestField(remoteWindows, dimensionId, position);
     }
 
-    private RemoteFlowField findNewestField(Map<WindowKey, RemoteFlowField> fields, Identifier dimensionId, Vec3d position) {
+    private RemoteFlowField findNewestField(Map<WindowKey, RemoteFlowField> fields, ResourceLocation dimensionId, Vec3 position) {
         RemoteFlowField best = null;
         long bestTick = Long.MIN_VALUE;
         for (RemoteFlowField field : fields.values()) {
@@ -249,7 +263,7 @@ final class AeroVisualizer {
         return best;
     }
 
-    private CoarseWindField findNewestCoarseField(Identifier dimensionId, Vec3d position) {
+    private CoarseWindField findNewestCoarseField(ResourceLocation dimensionId, Vec3 position) {
         CoarseWindField best = null;
         long bestTick = Long.MIN_VALUE;
         for (CoarseWindField field : coarseWindFields.values()) {
@@ -286,94 +300,95 @@ final class AeroVisualizer {
         });
     }
 
-    private void renderAtlasOverlay(WorldRenderContext context) {
-        if (!streamingEnabled || (remoteWindows.isEmpty() && localWindows.isEmpty())) {
+    private void renderAtlasOverlayInternal(RenderLevelStageEvent event) {
+        if (!streamingEnabled || (remoteWindows.isEmpty() && localWindows.isEmpty() && analysisWindows.isEmpty())) {
             return;
         }
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null || client.player == null || !client.getDebugHud().shouldShowDebugHud()) {
+        Minecraft client = Minecraft.getInstance();
+        if (client.level == null || client.player == null || !client.options.renderDebug) {
             return;
         }
-        Identifier dimensionId = client.world.getRegistryKey().getValue();
-        Vec3d cameraPos = client.gameRenderer.getCamera().getCameraPos();
-        VertexConsumer lineBuffer = context.consumers() == null ? null : context.consumers().getBuffer(RenderLayers.lines());
-        MatrixStack matrices = context.matrices();
-        try (var ignored = client.newGizmoScope()) {
-            for (RemoteFlowField field : localWindows.values()) {
-                if (!field.dimensionId().equals(dimensionId)) {
-                    continue;
-                }
-                double distanceSq = field.visibleBox().squaredMagnitude(cameraPos);
-                if (distanceSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) {
-                    continue;
-                }
-                renderRegionOutline(field, distanceSq);
-                if (distanceSq <= REMOTE_VECTOR_RENDER_DISTANCE * REMOTE_VECTOR_RENDER_DISTANCE) {
-                    renderFlowRendererField(lineBuffer, matrices, field, cameraPos);
-                }
+        ResourceLocation dimensionId = client.level.dimension().location();
+        Vec3 cameraPos = event.getCamera().getPosition();
+        MultiBufferSource.BufferSource bufferSource = client.renderBuffers().bufferSource();
+        VertexConsumer lineBuffer = bufferSource.getBuffer(RenderType.lines());
+        PoseStack matrices = event.getPoseStack();
+        for (RemoteFlowField field : localWindows.values()) {
+            if (!field.dimensionId().equals(dimensionId)) {
+                continue;
             }
-            for (RemoteFlowField field : remoteWindows.values()) {
-                if (!field.dimensionId().equals(dimensionId)) {
-                    continue;
-                }
-                if (localWindows.containsKey(new WindowKey(field.dimensionId(), field.origin()))) {
-                    continue;
-                }
-                double distanceSq = field.visibleBox().squaredMagnitude(cameraPos);
-                if (distanceSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) {
-                    continue;
-                }
-                renderRegionOutline(field, distanceSq);
-                if (distanceSq <= REMOTE_VECTOR_RENDER_DISTANCE * REMOTE_VECTOR_RENDER_DISTANCE) {
-                    renderFlowRendererField(lineBuffer, matrices, field, cameraPos);
-                }
+            double distanceSq = boxDistanceToCenterSq(field.visibleBox(), cameraPos);
+            if (distanceSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) {
+                continue;
             }
-            AnalysisSliceView analysisSlice = prepareAnalysisSlice(client, dimensionId, cameraPos);
-            if (analysisSlice != null) {
-                renderAnalysisOverlay(analysisSlice);
+            renderRegionOutline(lineBuffer, matrices, field, cameraPos, distanceSq);
+            if (distanceSq <= REMOTE_VECTOR_RENDER_DISTANCE * REMOTE_VECTOR_RENDER_DISTANCE) {
+                renderFlowRendererField(lineBuffer, matrices, field, cameraPos);
             }
         }
+        for (RemoteFlowField field : remoteWindows.values()) {
+            if (!field.dimensionId().equals(dimensionId)) {
+                continue;
+            }
+            if (localWindows.containsKey(new WindowKey(field.dimensionId(), field.origin()))) {
+                continue;
+            }
+            double distanceSq = boxDistanceToCenterSq(field.visibleBox(), cameraPos);
+            if (distanceSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) {
+                continue;
+            }
+            renderRegionOutline(lineBuffer, matrices, field, cameraPos, distanceSq);
+            if (distanceSq <= REMOTE_VECTOR_RENDER_DISTANCE * REMOTE_VECTOR_RENDER_DISTANCE) {
+                renderFlowRendererField(lineBuffer, matrices, field, cameraPos);
+            }
+        }
+        AnalysisSliceView analysisSlice = prepareAnalysisSlice(client, dimensionId, cameraPos);
+        if (analysisSlice != null) {
+            renderAnalysisOverlay(lineBuffer, matrices, analysisSlice, cameraPos);
+        }
+        bufferSource.endBatch(RenderType.lines());
     }
 
-    private void renderAnalysisOverlay(AnalysisSliceView analysisSlice) {
+    /**
+     * 1.20.1 has no AABB.squaredMagnitude(Vec3); compute squared distance from camera
+     * to the AABB center as an inexpensive proxy used purely for visibility culling.
+     */
+    private static double boxDistanceToCenterSq(AABB box, Vec3 point) {
+        double cx = (box.minX + box.maxX) * 0.5;
+        double cy = (box.minY + box.maxY) * 0.5;
+        double cz = (box.minZ + box.maxZ) * 0.5;
+        double dx = cx - point.x;
+        double dy = cy - point.y;
+        double dz = cz - point.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private void renderAnalysisOverlay(VertexConsumer buffer, PoseStack matrices, AnalysisSliceView analysisSlice, Vec3 cameraPos) {
         AnalysisFlowField field = analysisSlice.field();
         int sliceY = analysisSlice.sliceY();
         float speedRange = analysisSlice.speedRange();
-        SliceStats sliceStats = analysisSlice.sliceStats();
-        renderAnalysisSliceGlyphs(field, sliceY, speedRange);
-
-        Vec3d labelPos = new Vec3d(
-            field.origin().getX() + field.fullResolution() * 0.5,
-            field.origin().getY() + sliceY + 0.9,
-            field.origin().getZ() + field.fullResolution() * 0.5
-        );
-        String label = "CFD slice |v| y=" + (field.origin().getY() + sliceY)
-            + " max=" + String.format("%.2f", sliceStats.maxSpeed())
-            + " p95=" + String.format("%.2f", sliceStats.p95Speed());
-        GizmoDrawing.text(
-            label,
-            labelPos,
-            net.minecraft.world.debug.gizmo.TextGizmo.Style.centered(argb(0.92f, 0.96f, 0.98f, 1.0f)).scaled(0.03f)
-        ).ignoreOcclusion().withLifespan(1);
+        // CFD slice text label removed: 1.20.1 has no TextGizmo equivalent.
+        // The arrow glyphs below preserve the visual intent of the slice overlay.
+        renderAnalysisSliceGlyphs(buffer, matrices, field, sliceY, speedRange, cameraPos);
     }
 
-    private AnalysisSliceView prepareAnalysisSlice(MinecraftClient client, Identifier dimensionId, Vec3d cameraPos) {
+    private AnalysisSliceView prepareAnalysisSlice(Minecraft client, ResourceLocation dimensionId, Vec3 cameraPos) {
         AnalysisFlowField field = selectAnalysisField(dimensionId, cameraPos);
         if (field == null) {
             return null;
         }
-        double distanceSq = field.regionBox().squaredMagnitude(cameraPos);
+        double distanceSq = boxDistanceToCenterSq(field.regionBox(), cameraPos);
         if (distanceSq > ANALYSIS_RENDER_DISTANCE * ANALYSIS_RENDER_DISTANCE) {
             return null;
         }
-        double sliceWorldY = client.player != null ? client.player.getY() + ANALYSIS_SLICE_VIEW_OFFSET_Y : cameraPos.y + ANALYSIS_SLICE_VIEW_OFFSET_Y;
-        int sliceY = field.sliceIndexForWorldY(sliceWorldY);
+        double sliceLevelY = client.player != null ? client.player.getY() + ANALYSIS_SLICE_VIEW_OFFSET_Y : cameraPos.y + ANALYSIS_SLICE_VIEW_OFFSET_Y;
+        int sliceY = field.sliceIndexForLevelY(sliceLevelY);
         SliceStats sliceStats = field.sliceStats(sliceY);
         float speedRange = Math.max(ANALYSIS_SLICE_MIN_RANGE, sliceStats.colorRange());
         return new AnalysisSliceView(field, sliceY, sliceStats, speedRange);
     }
 
-    private AnalysisFlowField selectAnalysisField(Identifier dimensionId, Vec3d cameraPos) {
+    private AnalysisFlowField selectAnalysisField(ResourceLocation dimensionId, Vec3 cameraPos) {
         AnalysisFlowField bestContaining = null;
         double bestContainingDistanceSq = Double.POSITIVE_INFINITY;
         AnalysisFlowField bestNearest = null;
@@ -382,8 +397,8 @@ final class AeroVisualizer {
             if (!field.dimensionId().equals(dimensionId)) {
                 continue;
             }
-            Box regionBox = field.regionBox();
-            double distanceSq = regionBox.squaredMagnitude(cameraPos);
+            AABB regionBox = field.regionBox();
+            double distanceSq = boxDistanceToCenterSq(regionBox, cameraPos);
             if (regionBox.contains(cameraPos)) {
                 if (distanceSq < bestContainingDistanceSq) {
                     bestContaining = field;
@@ -397,67 +412,107 @@ final class AeroVisualizer {
         return bestContaining != null ? bestContaining : bestNearest;
     }
 
-    private void renderAnalysisSliceGlyphs(AnalysisFlowField field, int sliceY, float speedRange) {
+    private void renderAnalysisSliceGlyphs(VertexConsumer buffer, PoseStack matrices, AnalysisFlowField field, int sliceY, float speedRange, Vec3 cameraPos) {
+        if (buffer == null || matrices == null) {
+            return;
+        }
         int resolution = field.fullResolution();
         double arrowBaseY = field.origin().getY() + sliceY + ANALYSIS_SLICE_HEIGHT_OFFSET + 0.08;
+        var entry = matrices.last();
+        Matrix4f matrix = entry.pose();
         for (int x = 0; x < resolution; x += ANALYSIS_SLICE_GLYPH_STEP) {
             for (int z = 0; z < resolution; z += ANALYSIS_SLICE_GLYPH_STEP) {
-                Vec3d velocity = field.velocity(x, sliceY, z);
-                Vec3d horizontal = new Vec3d(velocity.x, 0.0, velocity.z);
+                Vec3 velocity = field.velocity(x, sliceY, z);
+                Vec3 horizontal = new Vec3(velocity.x, 0.0, velocity.z);
                 double horizontalSpeed = horizontal.length();
                 if (horizontalSpeed < ANALYSIS_SLICE_MIN_SPEED) {
                     continue;
                 }
-                Vec3d direction = horizontal.multiply(1.0 / horizontalSpeed);
+                Vec3 direction = horizontal.scale(1.0 / horizontalSpeed);
                 float speedNorm = Math.max(0.05f, clamp01((float) horizontalSpeed / speedRange));
                 double arrowLength = ANALYSIS_SLICE_GLYPH_LENGTH + ANALYSIS_SLICE_GLYPH_LENGTH * speedNorm;
-                Vec3d start = new Vec3d(field.origin().getX() + x + 0.5, arrowBaseY, field.origin().getZ() + z + 0.5);
-                Vec3d end = start.add(direction.multiply(arrowLength));
-                int glyphColor = analysisScalarColor(speedNorm, 0.72f);
-                GizmoDrawing.arrow(start, end, glyphColor, ANALYSIS_SLICE_GLYPH_WIDTH).ignoreOcclusion().withLifespan(1);
+                Vec3 start = new Vec3(field.origin().getX() + x + 0.5, arrowBaseY, field.origin().getZ() + z + 0.5);
+                Vec3 end = start.add(direction.scale(arrowLength));
+                int argb = analysisScalarColor(speedNorm, 0.72f);
+                int a = (argb >> 24) & 0xFF;
+                int r = (argb >> 16) & 0xFF;
+                int g = (argb >> 8) & 0xFF;
+                int b = argb & 0xFF;
+                emitLineSegment(buffer, entry, matrix, start, end, cameraPos, r, g, b, a);
             }
         }
     }
 
-    private void renderFlowRendererField(VertexConsumer buffer, MatrixStack matrices, RemoteFlowField field, Vec3d cameraPos) {
+    private static void emitLineSegment(
+        VertexConsumer buffer,
+        PoseStack.Pose entry,
+        Matrix4f matrix,
+        Vec3 from,
+        Vec3 to,
+        Vec3 cameraPos,
+        int r,
+        int g,
+        int b,
+        int a
+    ) {
+        Vec3 segDir = to.subtract(from);
+        double segLen = segDir.length();
+        if (segLen <= 1.0e-6) {
+            return;
+        }
+        Vec3 normalized = segDir.scale(1.0 / segLen);
+        float nx = (float) normalized.x;
+        float ny = (float) normalized.y;
+        float nz = (float) normalized.z;
+        buffer.vertex(matrix, (float) (from.x - cameraPos.x), (float) (from.y - cameraPos.y), (float) (from.z - cameraPos.z))
+            .color(r, g, b, a)
+            .normal(entry.normal(), nx, ny, nz)
+            .endVertex();
+        buffer.vertex(matrix, (float) (to.x - cameraPos.x), (float) (to.y - cameraPos.y), (float) (to.z - cameraPos.z))
+            .color(r, g, b, a)
+            .normal(entry.normal(), nx, ny, nz)
+            .endVertex();
+    }
+
+    private void renderFlowRendererField(VertexConsumer buffer, PoseStack matrices, RemoteFlowField field, Vec3 cameraPos) {
         if (buffer == null || matrices == null || (!renderVelocityVectors && !renderStreamlines)) {
             return;
         }
         if (renderVelocityVectors) {
-            matrices.push();
+            matrices.pushPose();
             matrices.translate(
                 field.origin().getX() - cameraPos.x,
                 field.origin().getY() - cameraPos.y,
                 field.origin().getZ() - cameraPos.z
             );
             renderVelocityField(buffer, matrices, field);
-            matrices.pop();
+            matrices.popPose();
         }
         if (renderStreamlines) {
-            matrices.push();
-            renderStreamlines(buffer, matrices, field, cameraPos);
-            matrices.pop();
+            matrices.pushPose();
+            renderStreamlinesField(buffer, matrices, field, cameraPos);
+            matrices.popPose();
         }
     }
 
-    private void renderVelocityField(VertexConsumer buffer, MatrixStack matrices, RemoteFlowField field) {
+    private void renderVelocityField(VertexConsumer buffer, PoseStack matrices, RemoteFlowField field) {
         int gridSize = field.fullResolution();
         int stride = REMOTE_VECTOR_FIELD_STRIDE;
         float velScale = 1.0f;
-        var entry = matrices.peek();
-        Matrix4f matrix = entry.getPositionMatrix();
+        PoseStack.Pose entry = matrices.last();
+        Matrix4f matrix = entry.pose();
 
         for (int x = 0; x < gridSize; x += stride) {
             for (int y = 0; y < gridSize; y += stride) {
                 for (int z = 0; z < gridSize; z += stride) {
-                    Vec3d velocity = field.sampleVelocityLocal(x + 0.5, y + 0.5, z + 0.5);
+                    Vec3 velocity = field.sampleVelocityLocal(x + 0.5, y + 0.5, z + 0.5);
                     float speed = (float) velocity.length();
-                    float speedNorm = MathHelper.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f);
+                    float speedNorm = Mth.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f);
                     if (speedNorm < RENDER_THRESHOLD_NORMALIZED) {
                         continue;
                     }
-                    Vec3d direction = velocity.normalize();
-                    float lineLength = MathHelper.clamp(speedNorm * velScale, 0.05f, 10f);
+                    Vec3 direction = velocity.normalize();
+                    float lineLength = Mth.clamp(speedNorm * velScale, 0.05f, 10f);
                     int color = getViridisColor(speedNorm * velScale);
                     int r = (color >> 16) & 0xFF;
                     int g = (color >> 8) & 0xFF;
@@ -468,8 +523,8 @@ final class AeroVisualizer {
 
                     buffer.vertex(matrix, fx, fy, fz)
                         .color(r, g, b, 255)
-                        .normal(entry, (float) direction.x, (float) direction.y, (float) direction.z)
-                        .lineWidth(1.2f);
+                        .normal(entry.normal(), (float) direction.x, (float) direction.y, (float) direction.z)
+                        .endVertex();
                     buffer.vertex(
                             matrix,
                             fx + (float) direction.x * lineLength,
@@ -477,20 +532,20 @@ final class AeroVisualizer {
                             fz + (float) direction.z * lineLength
                         )
                         .color(r, g, b, 255)
-                        .normal(entry, (float) direction.x, (float) direction.y, (float) direction.z)
-                        .lineWidth(1.2f);
+                        .normal(entry.normal(), (float) direction.x, (float) direction.y, (float) direction.z)
+                        .endVertex();
                 }
             }
         }
     }
 
-    private void renderStreamlines(VertexConsumer buffer, MatrixStack matrices, RemoteFlowField field, Vec3d cameraPos) {
+    private void renderStreamlinesField(VertexConsumer buffer, PoseStack matrices, RemoteFlowField field, Vec3 cameraPos) {
         int gridSize = field.fullResolution();
         int seedStride = REMOTE_STREAMLINE_SEED_STRIDE;
         float stepSize = 0.35f;
         int maxSteps = REMOTE_STREAMLINE_MAX_STEPS;
-        var entry = matrices.peek();
-        Matrix4f matrix = entry.getPositionMatrix();
+        PoseStack.Pose entry = matrices.last();
+        Matrix4f matrix = entry.pose();
 
         renderInflowFaceStreamlines(buffer, entry, matrix, field, cameraPos, gridSize, seedStride, stepSize, maxSteps, 0, -1);
         renderInflowFaceStreamlines(buffer, entry, matrix, field, cameraPos, gridSize, seedStride, stepSize, maxSteps, 0, 1);
@@ -502,10 +557,10 @@ final class AeroVisualizer {
 
     private void renderInflowFaceStreamlines(
         VertexConsumer buffer,
-        MatrixStack.Entry entry,
+        PoseStack.Pose entry,
         Matrix4f matrix,
         RemoteFlowField field,
-        Vec3d cameraPos,
+        Vec3 cameraPos,
         int gridSize,
         int seedStride,
         float stepSize,
@@ -531,7 +586,7 @@ final class AeroVisualizer {
                 float x = axis == 0 ? faceCoord : u + 0.5f;
                 float y = axis == 1 ? faceCoord : (axis == 0 ? u + 0.5f : v + 0.5f);
                 float z = axis == 2 ? faceCoord : v + 0.5f;
-                Vec3d velocity = field.sampleVelocityLocal(x, y, z);
+                Vec3 velocity = field.sampleVelocityLocal(x, y, z);
                 float inward = inwardComponent(velocity, axis, inwardSign);
                 if (inward < REMOTE_STREAMLINE_MIN_INFLOW) {
                     continue;
@@ -541,7 +596,7 @@ final class AeroVisualizer {
                     continue;
                 }
                 int bucket = streamlineFaceBucket(u, v, gridSize);
-                float score = inward * (0.35f + 0.65f * MathHelper.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f));
+                float score = inward * (0.35f + 0.65f * Mth.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f));
                 int bucketBase = bucket * REMOTE_STREAMLINE_SEEDS_PER_BUCKET;
                 for (int slot = 0; slot < REMOTE_STREAMLINE_SEEDS_PER_BUCKET; slot++) {
                     int seedIndex = bucketBase + slot;
@@ -572,7 +627,7 @@ final class AeroVisualizer {
                     entry,
                     matrix,
                     field,
-                    field.localToWorld(new Vec3d(bestX[i], bestY[i], bestZ[i])),
+                    field.localToLevel(new Vec3(bestX[i], bestY[i], bestZ[i])),
                     cameraPos,
                     stepSize,
                     maxSteps
@@ -587,22 +642,22 @@ final class AeroVisualizer {
         return bucketU * REMOTE_STREAMLINE_FACE_BUCKETS + bucketV;
     }
 
-    private float inwardComponent(Vec3d velocity, int axis, int inwardSign) {
+    private float inwardComponent(Vec3 velocity, int axis, int inwardSign) {
         double component = axis == 0 ? velocity.x : (axis == 1 ? velocity.y : velocity.z);
         return (float) component * inwardSign;
     }
 
     private void renderStreamlineFromSeed(
         VertexConsumer buffer,
-        MatrixStack.Entry entry,
+        PoseStack.Pose entry,
         Matrix4f matrix,
         RemoteFlowField field,
-        Vec3d seed,
-        Vec3d cameraPos,
+        Vec3 seed,
+        Vec3 cameraPos,
         float stepSize,
         int maxSteps
     ) {
-        Vec3d pos = seed;
+        Vec3 pos = seed;
         RemoteFlowField currentField = field;
         double traveled = 0.0;
         for (int step = 0; step < maxSteps; step++) {
@@ -611,20 +666,20 @@ final class AeroVisualizer {
                 break;
             }
             currentField = sample.field();
-            Vec3d velocity = sample.velocity();
+            Vec3 velocity = sample.velocity();
             float speed = (float) velocity.length();
             if (speed < MIN_SPEED) {
                 break;
             }
 
-            float speedNorm = MathHelper.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f);
+            float speedNorm = Mth.clamp(speed / MAX_INFLOW_SPEED, 0.0f, 1.0f);
             if (speedNorm < RENDER_THRESHOLD_NORMALIZED) {
                 break;
             }
 
-            Vec3d dir = velocity.normalize();
-            float advectStep = stepSize * MathHelper.clamp(speedNorm * 8.0f, 0.2f, 1.25f);
-            Vec3d nextPos = pos.add(dir.multiply(advectStep));
+            Vec3 dir = velocity.normalize();
+            float advectStep = stepSize * Mth.clamp(speedNorm * 8.0f, 0.2f, 1.25f);
+            Vec3 nextPos = pos.add(dir.scale(advectStep));
             RemoteFlowField nextField = findFieldForPosition(field.dimensionId(), nextPos, currentField);
             if (nextField == null) {
                 break;
@@ -638,7 +693,7 @@ final class AeroVisualizer {
             int r = (color >> 16) & 0xFF;
             int g = (color >> 8) & 0xFF;
             int b = color & 0xFF;
-            Vec3d segDir = nextPos.subtract(pos).normalize();
+            Vec3 segDir = nextPos.subtract(pos).normalize();
 
             buffer.vertex(
                     matrix,
@@ -647,8 +702,8 @@ final class AeroVisualizer {
                     (float) (pos.z - cameraPos.z)
                 )
                 .color(r, g, b, 255)
-                .normal(entry, (float) segDir.x, (float) segDir.y, (float) segDir.z)
-                .lineWidth(3.0f);
+                .normal(entry.normal(), (float) segDir.x, (float) segDir.y, (float) segDir.z)
+                .endVertex();
             buffer.vertex(
                     matrix,
                     (float) (nextPos.x - cameraPos.x),
@@ -656,8 +711,8 @@ final class AeroVisualizer {
                     (float) (nextPos.z - cameraPos.z)
                 )
                 .color(r, g, b, 255)
-                .normal(entry, (float) segDir.x, (float) segDir.y, (float) segDir.z)
-                .lineWidth(3.0f);
+                .normal(entry.normal(), (float) segDir.x, (float) segDir.y, (float) segDir.z)
+                .endVertex();
 
             pos = nextPos;
             currentField = nextField;
@@ -668,58 +723,58 @@ final class AeroVisualizer {
     private boolean hasNeighborAcrossFace(RemoteFlowField field, int axis, int side) {
         int offset = side * field.fullResolution();
         BlockPos neighborOrigin = switch (axis) {
-            case 0 -> field.origin().add(offset, 0, 0);
-            case 1 -> field.origin().add(0, offset, 0);
-            default -> field.origin().add(0, 0, offset);
+            case 0 -> field.origin().offset(offset, 0, 0);
+            case 1 -> field.origin().offset(0, offset, 0);
+            default -> field.origin().offset(0, 0, offset);
         };
         return remoteWindows.containsKey(new WindowKey(field.dimensionId(), neighborOrigin));
     }
 
-    private FlowSample sampleGlobalVelocity(Identifier dimensionId, Vec3d worldPos, RemoteFlowField preferredField) {
-        RemoteFlowField field = findFieldForPosition(dimensionId, worldPos, preferredField);
+    private FlowSample sampleGlobalVelocity(ResourceLocation dimensionId, Vec3 LevelPos, RemoteFlowField preferredField) {
+        RemoteFlowField field = findFieldForPosition(dimensionId, LevelPos, preferredField);
         if (field == null) {
             return null;
         }
-        return new FlowSample(field.sampleVelocityTrilinearClamped(worldPos), field);
+        return new FlowSample(field.sampleVelocityTrilinearClamped(LevelPos), field);
     }
 
-    private RemoteFlowField findFieldForPosition(Identifier dimensionId, Vec3d worldPos, RemoteFlowField preferredField) {
+    private RemoteFlowField findFieldForPosition(ResourceLocation dimensionId, Vec3 LevelPos, RemoteFlowField preferredField) {
         if (preferredField != null
             && preferredField.dimensionId().equals(dimensionId)
-            && containsHalfOpen(preferredField.regionBox(), worldPos)) {
+            && containsHalfOpen(preferredField.regionBox(), LevelPos)) {
             return preferredField;
         }
         if (preferredField != null) {
-            RemoteFlowField aligned = findAlignedFieldForPosition(dimensionId, worldPos, preferredField);
+            RemoteFlowField aligned = findAlignedFieldForPosition(dimensionId, LevelPos, preferredField);
             if (aligned != null) {
                 return aligned;
             }
         }
         for (RemoteFlowField field : remoteWindows.values()) {
-            if (field.dimensionId().equals(dimensionId) && containsHalfOpen(field.regionBox(), worldPos)) {
+            if (field.dimensionId().equals(dimensionId) && containsHalfOpen(field.regionBox(), LevelPos)) {
                 return field;
             }
         }
         return null;
     }
 
-    private RemoteFlowField findAlignedFieldForPosition(Identifier dimensionId, Vec3d worldPos, RemoteFlowField referenceField) {
+    private RemoteFlowField findAlignedFieldForPosition(ResourceLocation dimensionId, Vec3 LevelPos, RemoteFlowField referenceField) {
         int size = Math.max(1, referenceField.fullResolution());
-        int x = referenceField.origin().getX() + Math.floorDiv((int) Math.floor(worldPos.x) - referenceField.origin().getX(), size) * size;
-        int y = referenceField.origin().getY() + Math.floorDiv((int) Math.floor(worldPos.y) - referenceField.origin().getY(), size) * size;
-        int z = referenceField.origin().getZ() + Math.floorDiv((int) Math.floor(worldPos.z) - referenceField.origin().getZ(), size) * size;
+        int x = referenceField.origin().getX() + Math.floorDiv((int) Math.floor(LevelPos.x) - referenceField.origin().getX(), size) * size;
+        int y = referenceField.origin().getY() + Math.floorDiv((int) Math.floor(LevelPos.y) - referenceField.origin().getY(), size) * size;
+        int z = referenceField.origin().getZ() + Math.floorDiv((int) Math.floor(LevelPos.z) - referenceField.origin().getZ(), size) * size;
         RemoteFlowField aligned = remoteWindows.get(new WindowKey(dimensionId, new BlockPos(x, y, z)));
-        return aligned != null && containsHalfOpen(aligned.regionBox(), worldPos) ? aligned : null;
+        return aligned != null && containsHalfOpen(aligned.regionBox(), LevelPos) ? aligned : null;
     }
 
-    private boolean containsHalfOpen(Box box, Vec3d position) {
+    private boolean containsHalfOpen(AABB box, Vec3 position) {
         return position.x >= box.minX && position.x < box.maxX
             && position.y >= box.minY && position.y < box.maxY
             && position.z >= box.minZ && position.z < box.maxZ;
     }
 
     private int getViridisColor(float t) {
-        t = MathHelper.clamp(t, 0.0f, 1.0f);
+        t = Mth.clamp(t, 0.0f, 1.0f);
         float r;
         float g;
         float b;
@@ -747,15 +802,43 @@ final class AeroVisualizer {
         return ((int) (r * 255.0f) << 16) | ((int) (g * 255.0f) << 8) | (int) (b * 255.0f);
     }
 
-    private void renderRegionOutline(RemoteFlowField field, double distanceSq) {
+    private void renderRegionOutline(VertexConsumer buffer, PoseStack matrices, RemoteFlowField field, Vec3 cameraPos, double distanceSq) {
+        if (buffer == null || matrices == null) {
+            return;
+        }
         FlowVisual visual = field.visual();
         float maxSpeedNorm = clamp01(visual.maxSpeed() / 1.5f);
         float distanceNorm = clamp01((float) (Math.sqrt(distanceSq) / MAX_RENDER_DISTANCE));
         float distanceFade = 1.0f - smoothstep(0.20f, 1.0f, distanceNorm);
-        int strokeColor = viridisColor(maxSpeedNorm, 0.35f + 0.35f * distanceFade);
-        int fillColor = viridisColor(maxSpeedNorm * 0.65f, 0.03f + 0.04f * distanceFade);
-        DrawStyle style = DrawStyle.filledAndStroked(strokeColor, 1.0f + 0.6f * maxSpeedNorm, fillColor);
-        GizmoDrawing.box(field.visibleBox(), style).ignoreOcclusion().withLifespan(1);
+        int argb = viridisColor(maxSpeedNorm, 0.35f + 0.35f * distanceFade);
+        int a = (argb >> 24) & 0xFF;
+        int r = (argb >> 16) & 0xFF;
+        int g = (argb >> 8) & 0xFF;
+        int b = argb & 0xFF;
+        // Forge 1.20.1 has no gizmo box drawing API; emit the 12 AABB edges as line segments.
+        // The original style.filledAndStroked() fill is dropped — RenderType.lines() supports
+        // strokes only, and the outline alone preserves the visual diagnostic intent.
+        AABB box = field.visibleBox();
+        PoseStack.Pose entry = matrices.last();
+        Matrix4f matrix = entry.pose();
+        Vec3[] c = new Vec3[] {
+            new Vec3(box.minX, box.minY, box.minZ),
+            new Vec3(box.maxX, box.minY, box.minZ),
+            new Vec3(box.maxX, box.minY, box.maxZ),
+            new Vec3(box.minX, box.minY, box.maxZ),
+            new Vec3(box.minX, box.maxY, box.minZ),
+            new Vec3(box.maxX, box.maxY, box.minZ),
+            new Vec3(box.maxX, box.maxY, box.maxZ),
+            new Vec3(box.minX, box.maxY, box.maxZ),
+        };
+        int[][] edges = new int[][] {
+            {0,1},{1,2},{2,3},{3,0},
+            {4,5},{5,6},{6,7},{7,4},
+            {0,4},{1,5},{2,6},{3,7},
+        };
+        for (int[] edge : edges) {
+            emitLineSegment(buffer, entry, matrix, c[edge[0]], c[edge[1]], cameraPos, r, g, b, a);
+        }
     }
 
     private static float decodeVelocity(short value) {
@@ -860,7 +943,7 @@ final class AeroVisualizer {
         return argb(alpha, lerp(c0[0], c1[0], u), lerp(c0[1], c1[1], u), lerp(c0[2], c1[2], u));
     }
 
-    private record WindowKey(Identifier dimensionId, BlockPos origin) {
+    private record WindowKey(ResourceLocation dimensionId, BlockPos origin) {
     }
 
     private record AnalysisSliceView(
@@ -872,14 +955,14 @@ final class AeroVisualizer {
     }
 
     private record AnalysisFlowField(
-        Identifier dimensionId,
+        ResourceLocation dimensionId,
         BlockPos origin,
         int fullResolution,
         float[] flowState,
         long lastUpdatedTick
     ) {
-        Box regionBox() {
-            return new Box(
+        AABB regionBox() {
+            return new AABB(
                 origin.getX(),
                 origin.getY(),
                 origin.getZ(),
@@ -889,17 +972,17 @@ final class AeroVisualizer {
             );
         }
 
-        int sliceIndexForWorldY(double worldY) {
-            int local = (int) Math.floor(worldY - origin.getY());
+        int sliceIndexForLevelY(double LevelY) {
+            int local = (int) Math.floor(LevelY - origin.getY());
             return Math.max(0, Math.min(fullResolution - 1, local));
         }
 
-        Vec3d velocity(int x, int y, int z) {
+        Vec3 velocity(int x, int y, int z) {
             int index = (((x * fullResolution) + y) * fullResolution + z) * 4;
             if (index < 0 || index + 2 >= flowState.length) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
-            return new Vec3d(flowState[index], flowState[index + 1], flowState[index + 2]);
+            return new Vec3(flowState[index], flowState[index + 1], flowState[index + 2]);
         }
 
         float pressure(int x, int y, int z) {
@@ -911,7 +994,7 @@ final class AeroVisualizer {
         }
 
         float speed(int x, int y, int z) {
-            Vec3d velocity = velocity(x, y, z);
+            Vec3 velocity = velocity(x, y, z);
             return (float) velocity.length();
         }
 
@@ -950,7 +1033,7 @@ final class AeroVisualizer {
     ) {
     }
 
-    private record FlowSample(Vec3d velocity, RemoteFlowField field) {
+    private record FlowSample(Vec3 velocity, RemoteFlowField field) {
     }
 
     private record PackedFlowSample(float velocityX, float velocityY, float velocityZ, float pressure) {
@@ -966,7 +1049,7 @@ final class AeroVisualizer {
     }
 
     private record CoarseWindField(
-        Identifier dimensionId,
+        ResourceLocation dimensionId,
         BlockPos origin,
         int cellSize,
         int sizeX,
@@ -978,19 +1061,19 @@ final class AeroVisualizer {
     ) {
         static CoarseWindField fromPayload(AeroCoarseWindPayload payload, long lastUpdatedTick) {
             return new CoarseWindField(
-                payload.dimensionId(),
-                payload.origin(),
-                Math.max(1, payload.cellSize()),
-                Math.max(1, payload.sizeX()),
-                Math.max(1, payload.sizeY()),
-                Math.max(1, payload.sizeZ()),
-                payload.packedFlow(),
-                payload.packedAtmosphere(),
+                payload.dimensionId,
+                payload.origin,
+                Math.max(1, payload.cellSize),
+                Math.max(1, payload.sizeX),
+                Math.max(1, payload.sizeY),
+                Math.max(1, payload.sizeZ),
+                payload.packedFlow,
+                payload.packedAtmosphere,
                 lastUpdatedTick
             );
         }
 
-        AeroWindSample sampleFlowTrilinear(Vec3d position) {
+        AeroWindSample sampleFlowTrilinear(Vec3 position) {
             AeroWindSample flow = samplePackedFlow(
                 origin,
                 cellSize,
@@ -1028,8 +1111,8 @@ final class AeroVisualizer {
             );
         }
 
-        Box regionBox() {
-            return new Box(
+        AABB regionBox() {
+            return new AABB(
                 origin.getX(), origin.getY(), origin.getZ(),
                 origin.getX() + (double) sizeX * cellSize,
                 origin.getY() + (double) sizeY * cellSize,
@@ -1039,7 +1122,7 @@ final class AeroVisualizer {
     }
 
     private record RemoteFlowField(
-        Identifier dimensionId,
+        ResourceLocation dimensionId,
         BlockPos origin,
         int sampleStride,
         int atlasResolution,
@@ -1050,17 +1133,17 @@ final class AeroVisualizer {
     ) {
         static RemoteFlowField fromPayload(AeroFlowPayload payload, long lastUpdatedTick) {
             return fromPacked(
-                payload.dimensionId(),
-                payload.origin(),
-                payload.sampleStride(),
-                payload.packedFlow(),
+                payload.dimensionId,
+                payload.origin,
+                payload.sampleStride,
+                payload.packedFlow,
                 AeroWindSample.Authority.SERVER_AUTHORITATIVE,
                 lastUpdatedTick
             );
         }
 
         static RemoteFlowField fromPacked(
-            Identifier dimensionId,
+            ResourceLocation dimensionId,
             BlockPos origin,
             int sampleStride,
             short[] packedFlow,
@@ -1081,7 +1164,7 @@ final class AeroVisualizer {
             );
         }
 
-        AeroWindSample sampleFlowTrilinear(Vec3d position) {
+        AeroWindSample sampleFlowTrilinear(Vec3 position) {
             return samplePackedFlow(
                 origin,
                 sampleStride,
@@ -1095,7 +1178,7 @@ final class AeroVisualizer {
             );
         }
 
-        Vec3d sampleVelocity(Vec3d position) {
+        Vec3 sampleVelocity(Vec3 position) {
             double lx = (position.x - origin.getX()) / sampleStride;
             double ly = (position.y - origin.getY()) / sampleStride;
             double lz = (position.z - origin.getZ()) / sampleStride;
@@ -1103,44 +1186,44 @@ final class AeroVisualizer {
             int iy = (int) Math.round(ly - 0.5);
             int iz = (int) Math.round(lz - 0.5);
             if (ix < 0 || iy < 0 || iz < 0 || ix >= atlasResolution || iy >= atlasResolution || iz >= atlasResolution) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
             int cell = ((ix * atlasResolution + iy) * atlasResolution + iz) * 4;
             if (cell + 3 >= packedFlow.length) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
-            return new Vec3d(
+            return new Vec3(
                 decodeVelocity(packedFlow[cell]),
                 decodeVelocity(packedFlow[cell + 1]),
                 decodeVelocity(packedFlow[cell + 2])
             );
         }
 
-        Vec3d sampleVelocityTrilinear(Vec3d position) {
+        Vec3 sampleVelocityTrilinear(Vec3 position) {
             return sampleVelocity(origin, sampleStride, atlasResolution, packedFlow, position);
         }
 
-        Vec3d sampleVelocityTrilinearClamped(Vec3d position) {
+        Vec3 sampleVelocityTrilinearClamped(Vec3 position) {
             return sampleVelocityClamped(origin, sampleStride, atlasResolution, packedFlow, position);
         }
 
-        Vec3d sampleVelocityLocal(double x, double y, double z) {
-            return sampleVelocityTrilinear(localToWorld(new Vec3d(x, y, z)));
+        Vec3 sampleVelocityLocal(double x, double y, double z) {
+            return sampleVelocityTrilinear(localToLevel(new Vec3(x, y, z)));
         }
 
-        Vec3d localToWorld(Vec3d local) {
-            return new Vec3d(origin.getX() + local.x, origin.getY() + local.y, origin.getZ() + local.z);
+        Vec3 localToLevel(Vec3 local) {
+            return new Vec3(origin.getX() + local.x, origin.getY() + local.y, origin.getZ() + local.z);
         }
 
-        Box regionBox() {
+        AABB regionBox() {
             double size = (double) atlasResolution * (double) sampleStride;
-            return new Box(
+            return new AABB(
                 origin.getX(), origin.getY(), origin.getZ(),
                 origin.getX() + size, origin.getY() + size, origin.getZ() + size
             );
         }
 
-        Box visibleBox() {
+        AABB visibleBox() {
             return regionBox();
         }
 
@@ -1148,13 +1231,13 @@ final class AeroVisualizer {
             return atlasResolution * sampleStride;
         }
 
-        int sliceIndexForWorldY(double worldY) {
-            int local = (int) Math.floor(worldY - origin.getY());
+        int sliceIndexForLevelY(double LevelY) {
+            int local = (int) Math.floor(LevelY - origin.getY());
             return Math.max(0, Math.min(fullResolution() - 1, local));
         }
 
-        Vec3d velocity(int x, int y, int z) {
-            return sampleVelocityTrilinear(new Vec3d(
+        Vec3 velocity(int x, int y, int z) {
+            return sampleVelocityTrilinear(new Vec3(
                 origin.getX() + x + 0.5,
                 origin.getY() + y + 0.5,
                 origin.getZ() + z + 0.5
@@ -1188,25 +1271,25 @@ final class AeroVisualizer {
             return new SliceStats(max, mean, p95, colorRange);
         }
 
-        private static Vec3d sampleVelocity(BlockPos origin, int sampleStride, int atlasResolution, short[] packedFlow, Vec3d position) {
+        private static Vec3 sampleVelocity(BlockPos origin, int sampleStride, int atlasResolution, short[] packedFlow, Vec3 position) {
             double lx = (position.x - origin.getX()) / sampleStride - 0.5;
             double ly = (position.y - origin.getY()) / sampleStride - 0.5;
             double lz = (position.z - origin.getZ()) / sampleStride - 0.5;
             if (lx < 0.0 || ly < 0.0 || lz < 0.0
                 || lx > atlasResolution - 1.0 || ly > atlasResolution - 1.0 || lz > atlasResolution - 1.0) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
             return sampleVelocityAtSampleCoordinates(atlasResolution, packedFlow, lx, ly, lz);
         }
 
-        private static Vec3d sampleVelocityClamped(BlockPos origin, int sampleStride, int atlasResolution, short[] packedFlow, Vec3d position) {
-            double lx = MathHelper.clamp((position.x - origin.getX()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
-            double ly = MathHelper.clamp((position.y - origin.getY()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
-            double lz = MathHelper.clamp((position.z - origin.getZ()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
+        private static Vec3 sampleVelocityClamped(BlockPos origin, int sampleStride, int atlasResolution, short[] packedFlow, Vec3 position) {
+            double lx = Mth.clamp((position.x - origin.getX()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
+            double ly = Mth.clamp((position.y - origin.getY()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
+            double lz = Mth.clamp((position.z - origin.getZ()) / sampleStride - 0.5, 0.0, atlasResolution - 1.0);
             return sampleVelocityAtSampleCoordinates(atlasResolution, packedFlow, lx, ly, lz);
         }
 
-        private static Vec3d sampleVelocityAtSampleCoordinates(int atlasResolution, short[] packedFlow, double lx, double ly, double lz) {
+        private static Vec3 sampleVelocityAtSampleCoordinates(int atlasResolution, short[] packedFlow, double lx, double ly, double lz) {
             int x0 = (int) Math.floor(lx);
             int y0 = (int) Math.floor(ly);
             int z0 = (int) Math.floor(lz);
@@ -1216,26 +1299,26 @@ final class AeroVisualizer {
             double fx = x1 == x0 ? 0.0 : lx - x0;
             double fy = y1 == y0 ? 0.0 : ly - y0;
             double fz = z1 == z0 ? 0.0 : lz - z0;
-            Vec3d c000 = loadVelocity(atlasResolution, packedFlow, x0, y0, z0);
-            Vec3d c100 = loadVelocity(atlasResolution, packedFlow, x1, y0, z0);
-            Vec3d c010 = loadVelocity(atlasResolution, packedFlow, x0, y1, z0);
-            Vec3d c110 = loadVelocity(atlasResolution, packedFlow, x1, y1, z0);
-            Vec3d c001 = loadVelocity(atlasResolution, packedFlow, x0, y0, z1);
-            Vec3d c101 = loadVelocity(atlasResolution, packedFlow, x1, y0, z1);
-            Vec3d c011 = loadVelocity(atlasResolution, packedFlow, x0, y1, z1);
-            Vec3d c111 = loadVelocity(atlasResolution, packedFlow, x1, y1, z1);
-            Vec3d c00 = c000.lerp(c100, fx);
-            Vec3d c10 = c010.lerp(c110, fx);
-            Vec3d c01 = c001.lerp(c101, fx);
-            Vec3d c11 = c011.lerp(c111, fx);
-            Vec3d c0 = c00.lerp(c10, fy);
-            Vec3d c1 = c01.lerp(c11, fy);
+            Vec3 c000 = loadVelocity(atlasResolution, packedFlow, x0, y0, z0);
+            Vec3 c100 = loadVelocity(atlasResolution, packedFlow, x1, y0, z0);
+            Vec3 c010 = loadVelocity(atlasResolution, packedFlow, x0, y1, z0);
+            Vec3 c110 = loadVelocity(atlasResolution, packedFlow, x1, y1, z0);
+            Vec3 c001 = loadVelocity(atlasResolution, packedFlow, x0, y0, z1);
+            Vec3 c101 = loadVelocity(atlasResolution, packedFlow, x1, y0, z1);
+            Vec3 c011 = loadVelocity(atlasResolution, packedFlow, x0, y1, z1);
+            Vec3 c111 = loadVelocity(atlasResolution, packedFlow, x1, y1, z1);
+            Vec3 c00 = c000.lerp(c100, fx);
+            Vec3 c10 = c010.lerp(c110, fx);
+            Vec3 c01 = c001.lerp(c101, fx);
+            Vec3 c11 = c011.lerp(c111, fx);
+            Vec3 c0 = c00.lerp(c10, fy);
+            Vec3 c1 = c01.lerp(c11, fy);
             return c0.lerp(c1, fz);
         }
 
-        private static Vec3d loadVelocity(int atlasResolution, short[] packedFlow, int x, int y, int z) {
+        private static Vec3 loadVelocity(int atlasResolution, short[] packedFlow, int x, int y, int z) {
             int cell = ((x * atlasResolution + y) * atlasResolution + z) * 4;
-            return new Vec3d(
+            return new Vec3(
                 decodeVelocity(packedFlow[cell]),
                 decodeVelocity(packedFlow[cell + 1]),
                 decodeVelocity(packedFlow[cell + 2])
@@ -1293,7 +1376,7 @@ final class AeroVisualizer {
         int sizeY,
         int sizeZ,
         short[] packedFlow,
-        Vec3d position,
+        Vec3 position,
         AeroWindSample.Level level,
         AeroWindSample.Authority authority
     ) {
@@ -1304,9 +1387,9 @@ final class AeroVisualizer {
             || rx >= sizeX || ry >= sizeY || rz >= sizeZ) {
             return AeroWindSample.ZERO;
         }
-        double lx = MathHelper.clamp(rx - 0.5, 0.0, sizeX - 1.0);
-        double ly = MathHelper.clamp(ry - 0.5, 0.0, sizeY - 1.0);
-        double lz = MathHelper.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
+        double lx = Mth.clamp(rx - 0.5, 0.0, sizeX - 1.0);
+        double ly = Mth.clamp(ry - 0.5, 0.0, sizeY - 1.0);
+        double lz = Mth.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
         PackedFlowSample sample = samplePackedFlowAtSampleCoordinates(sizeX, sizeY, sizeZ, packedFlow, lx, ly, lz);
         return new AeroWindSample(
             sample.velocityX(),
@@ -1377,7 +1460,7 @@ final class AeroVisualizer {
         int sizeY,
         int sizeZ,
         short[] packedAtmosphere,
-        Vec3d position
+        Vec3 position
     ) {
         double rx = (position.x - origin.getX()) / sampleStride;
         double ry = (position.y - origin.getY()) / sampleStride;
@@ -1386,9 +1469,9 @@ final class AeroVisualizer {
             || rx >= sizeX || ry >= sizeY || rz >= sizeZ) {
             return PackedAtmosphereSample.EMPTY;
         }
-        double lx = MathHelper.clamp(rx - 0.5, 0.0, sizeX - 1.0);
-        double ly = MathHelper.clamp(ry - 0.5, 0.0, sizeY - 1.0);
-        double lz = MathHelper.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
+        double lx = Mth.clamp(rx - 0.5, 0.0, sizeX - 1.0);
+        double ly = Mth.clamp(ry - 0.5, 0.0, sizeY - 1.0);
+        double lz = Mth.clamp(rz - 0.5, 0.0, sizeZ - 1.0);
         return samplePackedAtmosphereAtSampleCoordinates(sizeX, sizeY, sizeZ, packedAtmosphere, lx, ly, lz);
     }
 
@@ -1511,25 +1594,25 @@ final class AeroVisualizer {
             );
         }
 
-        Vec3d averageDirection() {
+        Vec3 averageDirection() {
             double length = Math.sqrt(meanVx * meanVx + meanVy * meanVy + meanVz * meanVz);
             if (length <= 1.0e-6) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
-            return new Vec3d(meanVx / length, meanVy / length, meanVz / length);
+            return new Vec3(meanVx / length, meanVy / length, meanVz / length);
         }
 
-        Vec3d dominantDirection() {
+        Vec3 dominantDirection() {
             double length = Math.sqrt(dominantVx * dominantVx + dominantVy * dominantVy + dominantVz * dominantVz);
             if (length <= 1.0e-6) {
-                return Vec3d.ZERO;
+                return Vec3.ZERO;
             }
-            return new Vec3d(dominantVx / length, dominantVy / length, dominantVz / length);
+            return new Vec3(dominantVx / length, dominantVy / length, dominantVz / length);
         }
 
-        Vec3d displayDirection() {
-            Vec3d average = averageDirection();
-            if (average.lengthSquared() > 1.0e-4) {
+        Vec3 displayDirection() {
+            Vec3 average = averageDirection();
+            if (average.lengthSqr() > 1.0e-4) {
                 return average;
             }
             return dominantDirection();

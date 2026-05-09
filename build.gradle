@@ -1,18 +1,67 @@
 plugins {
-	id 'fabric-loom' version "${loom_version}"
+	id 'eclipse'
+	id 'idea'
 	id 'maven-publish'
+	id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+	id 'org.spongepowered.mixin' version '0.7.+'
 }
 
-version = project.mod_version
-group = project.maven_group
+version = mod_version
+group = mod_group_id
 
 base {
-	archivesName = project.archives_base_name
+	archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+mixin {
+    add sourceSets.main, "${mod_id}.refmap.json"
+
+    config "modid.mixins.json"
+    config "aerodynamics4mc.client.mixins.json"
 }
 
 repositories {
-	maven { url = 'https://maven.fabricmc.net' }
 	mavenCentral()
+	maven {
+		name = "Forge"
+		url = "https://files.minecraftforge.net/maven"
+	}
+	maven {
+		name = "SpongePowered"
+		url = "https://repo.spongepowered.org/repository/maven-public/"
+	}
+}
+
+minecraft {
+	mappings channel: mapping_channel, version: mapping_version
+	
+	copyIdeResources = true
+
+	runs {
+		configureEach {
+			workingDirectory project.file('run')
+			
+			property 'forge.logging.markers', 'REGISTRIES'
+			property 'forge.logging.console.level', 'debug'
+			
+			mods {
+				"${mod_id}" {
+					source sourceSets.main
+				}
+			}
+		}
+
+		client {
+			property 'forge.enabledGameTestNamespaces', mod_id
+		}
+
+		server {
+			property 'forge.enabledGameTestNamespaces', mod_id
+			args '--nogui'
+		}
+	}
 }
 
 def generatedNativeResourcesDir = layout.buildDirectory.dir("generated/native-resources")
@@ -77,36 +126,9 @@ tasks.register("prepareNativeResources") {
 	}
 }
 
-loom {
-	splitEnvironmentSourceSets()
-	mods {
-		"aerodynamics4mc" {
-			sourceSet sourceSets.main
-			sourceSet sourceSets.client
-		}
-	}
-}
-
-sourceSets {
-	main {
-		java {
-			exclude 'com/example/**'
-		}
-	}
-	client {
-		java {
-			exclude 'com/example/**'
-		}
-	}
-}
-
 dependencies {
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 	implementation "com.github.luben:zstd-jni:1.5.7-4"
-	include "com.github.luben:zstd-jni:1.5.7-4"
 }
 
 processResources {
@@ -114,28 +136,20 @@ processResources {
 	inputs.property "version", project.version
 	from(generatedNativeResourcesDir)
 
-	filesMatching("fabric.mod.json") {
-		expand "version": inputs.properties.version
+	filesMatching("META-INF/mods.toml") {
+		expand project.properties
 	}
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
+	it.options.release = 17
 	it.options.encoding = 'UTF-8'
 }
 
 java {
 	withSourcesJar()
 	toolchain {
-		languageVersion = JavaLanguageVersion.of(21)
-	}
-}
-
-jar {
-	inputs.property "archivesName", project.base.archivesName
-
-	from("LICENSE") {
-		rename { "${it}_${inputs.properties.archivesName}"}
+		languageVersion = JavaLanguageVersion.of(17)
 	}
 }
 
@@ -143,7 +157,7 @@ jar {
 publishing {
 	publications {
 		create("mavenJava", MavenPublication) {
-			artifactId = project.archives_base_name
+			artifactId = mod_id
 			from components.java
 		}
 	}

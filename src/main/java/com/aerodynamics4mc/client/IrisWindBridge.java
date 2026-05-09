@@ -9,24 +9,24 @@ import org.slf4j.LoggerFactory;
 import com.aerodynamics4mc.ModBlocks;
 import com.aerodynamics4mc.api.AeroClientWindApi;
 import com.aerodynamics4mc.api.SamplePolicy;
+import com.mojang.blaze3d.platform.NativeImage;
 
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldTerrainRenderContext;
-import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.texture.NativeImage;
-import net.minecraft.client.texture.NativeImageBackedTexture;
-import net.minecraft.client.texture.TextureManager;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.client.renderer.texture.TextureManager;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.Mth;
+import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
+import net.minecraftforge.client.event.RenderLevelStageEvent;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.ModList;
 
 final class IrisWindBridge {
     private static final Logger LOGGER = LoggerFactory.getLogger("aerodynamics4mc/IrisWindBridge");
-    static final Identifier WIND_TEXTURE_ID = Identifier.of(ModBlocks.MOD_ID, "dynamic/foliage_wind");
+    static final ResourceLocation WIND_TEXTURE_ID = ResourceLocation.fromNamespaceAndPath(ModBlocks.MOD_ID, "dynamic/foliage_wind");
 
     static final int GRID_X = 48;
     static final int GRID_Y = 24;
@@ -48,7 +48,7 @@ final class IrisWindBridge {
     private static Method irisShaderPackInUseMethod;
 
     private final AeroVisualizer visualizer;
-    private NativeImageBackedTexture windTexture;
+    private DynamicTexture windTexture;
     private float[] targetWindField;
     private float[] bendField;
     private float[] bendVelocityField;
@@ -79,10 +79,7 @@ final class IrisWindBridge {
     }
 
     void initialize() {
-        ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
-        WorldRenderEvents.START_MAIN.register(this::onRenderFrame);
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> clear());
-        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> close());
+        MinecraftForge.EVENT_BUS.register(this);
     }
 
     void onRuntimeState(boolean streamingEnabled) {
@@ -97,8 +94,13 @@ final class IrisWindBridge {
         dirty = true;
     }
 
-    private void onClientTick(MinecraftClient client) {
-        boolean irisLoaded = FabricLoader.getInstance().isModLoaded("iris");
+    @SubscribeEvent
+    public void onClientTick(TickEvent.ClientTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        Minecraft client = Minecraft.getInstance();
+        boolean irisLoaded = ModList.get().isLoaded("iris");
         if (!irisLoaded) {
             if (!loggedMissingIris) {
                 LOGGER.info("Iris wind bridge idle: Iris mod not loaded");
@@ -117,21 +119,21 @@ final class IrisWindBridge {
             return;
         }
         loggedInactiveShaderpack = false;
-        if (client.world == null || client.player == null) {
+        if (client.level == null || client.player == null) {
             return;
         }
         ensureTexture(client.getTextureManager());
         if (windTexture == null) {
             return;
         }
-        Vec3d anchorPos = client.gameRenderer != null
-            ? client.gameRenderer.getCamera().getCameraPos()
-            : new Vec3d(client.player.getX(), client.player.getY(), client.player.getZ());
+        Vec3 anchorPos = client.gameRenderer != null
+            ? client.gameRenderer.getMainCamera().getPosition()
+            : new Vec3(client.player.getX(), client.player.getY(), client.player.getZ());
         long anchorX = quantizedOrigin(anchorPos.x, GRID_X);
         long anchorY = quantizedOrigin(anchorPos.y, GRID_Y);
         long anchorZ = quantizedOrigin(anchorPos.z, GRID_Z);
         boolean anchorChanged = anchorX != lastAnchorX || anchorY != lastAnchorY || anchorZ != lastAnchorZ;
-        boolean periodicRefresh = lastUploadTick == Long.MIN_VALUE || client.world.getTime() - lastUploadTick >= REFRESH_INTERVAL_TICKS;
+        boolean periodicRefresh = lastUploadTick == Long.MIN_VALUE || client.level.getGameTime() - lastUploadTick >= REFRESH_INTERVAL_TICKS;
         if (!dirty && !anchorChanged && !periodicRefresh) {
             return;
         }
@@ -142,46 +144,42 @@ final class IrisWindBridge {
         lastAnchorX = anchorX;
         lastAnchorY = anchorY;
         lastAnchorZ = anchorZ;
-        lastUploadTick = client.world.getTime();
+        lastUploadTick = client.level.getGameTime();
         dirty = false;
-        // if (lastDiagnosticTick == Long.MIN_VALUE || client.world.getTime() - lastDiagnosticTick >= 100) {
-        //     LOGGER.info(
-        //         "Iris wind refresh: streaming={} nonZeroCells={} maxSpeed={} meanSpeed={} origin=({}, {}, {})",
-        //         streamingEnabled,
-        //         stats.nonZeroCells(),
-        //         String.format("%.3f", stats.maxSpeed()),
-        //         String.format("%.3f", stats.meanSpeed()),
-        //         anchorX,
-        //         anchorY,
-        //         anchorZ
-        //     );
-        //     lastDiagnosticTick = client.world.getTime();
-        // }
     }
 
-    private void onRenderFrame(WorldTerrainRenderContext context) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null || client.world == null || client.player == null || windTexture == null || windTexture.getImage() == null) {
+    @SubscribeEvent
+    public void onRenderLevel(RenderLevelStageEvent event) {
+        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) {
+            return;
+        }
+        Minecraft client = Minecraft.getInstance();
+        if (client.level == null || client.player == null || windTexture == null || windTexture.getPixels() == null) {
             return;
         }
         if (!streamingEnabled) {
             return;
         }
-        if (!FabricLoader.getInstance().isModLoaded("iris") || !isShaderPackInUseReflective()) {
+        if (!ModList.get().isLoaded("iris") || !isShaderPackInUseReflective()) {
             return;
         }
-        long gameTime = client.world.getTime();
+        long gameTime = client.level.getGameTime();
         if (lastTextureUploadTick == gameTime) {
             return;
         }
-        float deltaTicks = MathHelper.clamp(client.getRenderTickCounter().getDynamicDeltaTicks(), 0.05f, 1.5f);
+        float deltaTicks = Mth.clamp(client.getDeltaFrameTime(), 0.05f, 1.5f);
         integrateBendField(deltaTicks);
         uploadBendTexture();
         lastTextureUploadTick = gameTime;
     }
 
-    private RefreshStats refreshTargetWindField(MinecraftClient client, long originX, long originY, long originZ, boolean anchorChanged) {
-        if (windTexture == null || windTexture.getImage() == null || client.world == null) {
+    @SubscribeEvent
+    public void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        clear();
+    }
+
+    private RefreshStats refreshTargetWindField(Minecraft client, long originX, long originY, long originZ, boolean anchorChanged) {
+        if (windTexture == null || windTexture.getPixels() == null || client.level == null) {
             return new RefreshStats(0, 0.0, 0.0, true);
         }
         ensureStateArrays();
@@ -204,16 +202,16 @@ final class IrisWindBridge {
             int z = yz % GRID_Z;
             int y = yz / GRID_Z;
             int windBase = cell * 3;
-            double worldX = originX + (x + 0.5) * CELL_SIZE_BLOCKS;
-            double worldY = originY + (y + 0.5) * CELL_SIZE_BLOCKS;
-            double worldZ = originZ + (z + 0.5) * CELL_SIZE_BLOCKS;
-            Vec3d sampledWind = streamingEnabled
+            double levelX = originX + (x + 0.5) * CELL_SIZE_BLOCKS;
+            double levelY = originY + (y + 0.5) * CELL_SIZE_BLOCKS;
+            double levelZ = originZ + (z + 0.5) * CELL_SIZE_BLOCKS;
+            Vec3 sampledWind = streamingEnabled
                 ? AeroClientWindApi.sample(
-                    client.world,
-                    new Vec3d(worldX, worldY, worldZ),
+                    client.level,
+                    new Vec3(levelX, levelY, levelZ),
                     SamplePolicy.CLIENT_LOCAL_PREFERRED
                 ).effectiveVelocity()
-                : Vec3d.ZERO;
+                : Vec3.ZERO;
             targetWindField[windBase] = (float) sampledWind.x;
             targetWindField[windBase + 1] = (float) sampledWind.y;
             targetWindField[windBase + 2] = (float) sampledWind.z;
@@ -256,8 +254,8 @@ final class IrisWindBridge {
         }
         NativeImage image = new NativeImage(TEXTURE_WIDTH, TEXTURE_HEIGHT, false);
         image.fillRect(0, 0, TEXTURE_WIDTH, TEXTURE_HEIGHT, 0x00000000);
-        windTexture = new NativeImageBackedTexture(() -> "aerodynamics4mc_iris_wind_bridge", image);
-        textureManager.registerTexture(WIND_TEXTURE_ID, windTexture);
+        windTexture = new DynamicTexture(image);
+        textureManager.register(WIND_TEXTURE_ID, windTexture);
         dirty = true;
     }
 
@@ -351,8 +349,8 @@ final class IrisWindBridge {
         for (int cell = 0; cell < cellCount; cell++) {
             int windBase = cell * 3;
             int bendBase = cell * 2;
-            float targetX = MathHelper.clamp(targetWindField[windBase] * WIND_TO_BEND_SCALE, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
-            float targetZ = MathHelper.clamp(targetWindField[windBase + 2] * WIND_TO_BEND_SCALE, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
+            float targetX = Mth.clamp(targetWindField[windBase] * WIND_TO_BEND_SCALE, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
+            float targetZ = Mth.clamp(targetWindField[windBase + 2] * WIND_TO_BEND_SCALE, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
 
             float bendX = bendField[bendBase];
             float bendZ = bendField[bendBase + 1];
@@ -364,11 +362,11 @@ final class IrisWindBridge {
 
             velX += accelX * clampedDelta;
             velZ += accelZ * clampedDelta;
-            velX = MathHelper.clamp(velX, -MAX_BEND_VELOCITY_PER_TICK, MAX_BEND_VELOCITY_PER_TICK);
-            velZ = MathHelper.clamp(velZ, -MAX_BEND_VELOCITY_PER_TICK, MAX_BEND_VELOCITY_PER_TICK);
+            velX = Mth.clamp(velX, -MAX_BEND_VELOCITY_PER_TICK, MAX_BEND_VELOCITY_PER_TICK);
+            velZ = Mth.clamp(velZ, -MAX_BEND_VELOCITY_PER_TICK, MAX_BEND_VELOCITY_PER_TICK);
 
-            bendX = MathHelper.clamp(bendX + velX * clampedDelta, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
-            bendZ = MathHelper.clamp(bendZ + velZ * clampedDelta, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
+            bendX = Mth.clamp(bendX + velX * clampedDelta, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
+            bendZ = Mth.clamp(bendZ + velZ * clampedDelta, -MAX_BEND_MAGNITUDE, MAX_BEND_MAGNITUDE);
 
             bendField[bendBase] = bendX;
             bendField[bendBase + 1] = bendZ;
@@ -378,15 +376,15 @@ final class IrisWindBridge {
     }
 
     private void uploadBendTexture() {
-        if (windTexture == null || windTexture.getImage() == null || bendField == null) {
+        if (windTexture == null || windTexture.getPixels() == null || bendField == null) {
             return;
         }
-        NativeImage image = windTexture.getImage();
+        NativeImage image = windTexture.getPixels();
         for (int y = 0; y < GRID_Y; y++) {
             for (int z = 0; z < GRID_Z; z++) {
                 for (int x = 0; x < GRID_X; x++) {
                     int bendBase = cellIndex(x, y, z) * 2;
-                    image.setColorArgb(flattenX(x, z), y, encodeWind(bendField[bendBase], 0.0f, bendField[bendBase + 1]));
+                    image.setPixelRGBA(flattenX(x, z), y, encodeWindAbgr(bendField[bendBase], 0.0f, bendField[bendBase + 1]));
                 }
             }
         }
@@ -394,10 +392,10 @@ final class IrisWindBridge {
     }
 
     private void zeroTexture() {
-        if (windTexture == null || windTexture.getImage() == null) {
+        if (windTexture == null || windTexture.getPixels() == null) {
             return;
         }
-        NativeImage image = windTexture.getImage();
+        NativeImage image = windTexture.getPixels();
         image.fillRect(0, 0, TEXTURE_WIDTH, TEXTURE_HEIGHT, 0x00000000);
         windTexture.upload();
         if (targetWindField != null) {
@@ -425,24 +423,6 @@ final class IrisWindBridge {
         zeroTexture();
     }
 
-    private void close() {
-        clear();
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client != null) {
-            client.getTextureManager().destroyTexture(WIND_TEXTURE_ID);
-        }
-        if (windTexture != null) {
-            windTexture.close();
-            windTexture = null;
-        }
-        targetWindField = null;
-        bendField = null;
-        bendVelocityField = null;
-        shiftWindBuffer = null;
-        shiftBendBuffer = null;
-        shiftVelocityBuffer = null;
-    }
-
     private static int flattenX(int x, int z) {
         return z * GRID_X + x;
     }
@@ -454,25 +434,25 @@ final class IrisWindBridge {
     private static long quantizedOrigin(double cameraCoord, int axisCells) {
         int extentBlocks = axisCells * CELL_SIZE_BLOCKS;
         int halfExtentBlocks = extentBlocks / 2;
-        int aligned = MathHelper.floor(cameraCoord / CELL_SIZE_BLOCKS) * CELL_SIZE_BLOCKS;
+        int aligned = Mth.floor(cameraCoord / CELL_SIZE_BLOCKS) * CELL_SIZE_BLOCKS;
         return (long) aligned - halfExtentBlocks;
     }
 
-    private static int encodeWind(float windX, float windY, float windZ) {
-        float wx = MathHelper.clamp(windX, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float wy = MathHelper.clamp(windY, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float wz = MathHelper.clamp(windZ, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
-        float magnitude = MathHelper.clamp((float) Math.sqrt(wx * wx + wy * wy + wz * wz) / ENCODED_MAX_WIND_MPS, 0.0f, 1.0f);
+    private static int encodeWindAbgr(float windX, float windY, float windZ) {
+        float wx = Mth.clamp(windX, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float wy = Mth.clamp(windY, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float wz = Mth.clamp(windZ, -ENCODED_MAX_WIND_MPS, ENCODED_MAX_WIND_MPS);
+        float magnitude = Mth.clamp((float) Math.sqrt(wx * wx + wy * wy + wz * wz) / ENCODED_MAX_WIND_MPS, 0.0f, 1.0f);
         int a = Math.round(magnitude * 255.0f);
         int r = encodeSigned(wx);
         int g = encodeSigned(wy);
         int b = encodeSigned(wz);
-        return (a << 24) | (r << 16) | (g << 8) | b;
+        return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
     private static int encodeSigned(float value) {
         float normalized = value / ENCODED_MAX_WIND_MPS;
-        return Math.round((MathHelper.clamp(normalized, -1.0f, 1.0f) * 0.5f + 0.5f) * 255.0f);
+        return Math.round((Mth.clamp(normalized, -1.0f, 1.0f) * 0.5f + 0.5f) * 255.0f);
     }
 
     private record RefreshStats(int nonZeroCells, double maxSpeed, double meanSpeed, boolean complete) {}

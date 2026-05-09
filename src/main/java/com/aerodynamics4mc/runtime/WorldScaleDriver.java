@@ -8,11 +8,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.MathHelper;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
 
-final class WorldScaleDriver {
+final class LevelScaleDriver {
     private static final float TAU = (float) (Math.PI * 2.0);
     private static final float BASE_FLOW_RELAX_PER_SECOND = 1.0f / 900.0f;
     private static final float THERMAL_RELAX_PER_SECOND = 1.0f / 1800.0f;
@@ -67,7 +67,7 @@ final class WorldScaleDriver {
     private static final float TORNADO_MIN_CLUSTER_COOLDOWN_SECONDS = 80.0f;
     private static final float TORNADO_MAX_CLUSTER_COOLDOWN_SECONDS = 180.0f;
 
-    private final long worldSeed;
+    private final long LevelSeed;
     private final List<CycloneCell> cycloneCells;
     private final List<ConvectiveCluster> convectiveClusters;
     private final List<TornadoVortex> tornadoVortices;
@@ -85,8 +85,8 @@ final class WorldScaleDriver {
     private float mesoscaleShearSupport;
     private int nextTornadoId;
 
-    private WorldScaleDriver(
-        long worldSeed,
+    private LevelScaleDriver(
+        long LevelSeed,
         float driverTimeSeconds,
         float baseFlowX,
         float baseFlowZ,
@@ -99,7 +99,7 @@ final class WorldScaleDriver {
         List<ConvectiveCluster> convectiveClusters,
         List<TornadoVortex> tornadoVortices
     ) {
-        this.worldSeed = worldSeed;
+        this.LevelSeed = LevelSeed;
         this.driverTimeSeconds = driverTimeSeconds;
         this.baseFlowX = baseFlowX;
         this.baseFlowZ = baseFlowZ;
@@ -114,38 +114,38 @@ final class WorldScaleDriver {
         this.nextTornadoId = computeNextTornadoId(tornadoVortices);
     }
 
-    static WorldScaleDriver loadOrCreate(Path path, ServerWorld world) {
+    static LevelScaleDriver loadOrCreate(Path path, ServerLevel level) {
         if (path != null && Files.isRegularFile(path)) {
             try {
-                return fromLines(world.getSeed(), Files.readAllLines(path, StandardCharsets.UTF_8));
+                return fromLines(level.getSeed(), Files.readAllLines(path, StandardCharsets.UTF_8));
             } catch (IOException ignored) {
                 // Fall back to deterministic initialization below.
             }
         }
-        return createDefault(world.getSeed());
+        return createDefault(level.getSeed());
     }
 
-    private static WorldScaleDriver createDefault(long worldSeed) {
-        List<CycloneCell> defaultCycloneCells = createDefaultCycloneCells(worldSeed);
-        float baseDirection = seededUnit(worldSeed, 0x15f11f73d3e4a5b1L) * TAU;
-        float baseSpeed = 1.8f + seededUnit(worldSeed, 0x6a09e667f3bcc909L) * 2.2f;
-        float baseFlowX = MathHelper.cos(baseDirection) * baseSpeed;
-        float baseFlowZ = MathHelper.sin(baseDirection) * baseSpeed;
-        float airmassTemperatureBias = (seededUnit(worldSeed, 0xbb67ae8584caa73bL) - 0.5f) * 6.0f;
-        float airmassMoistureBias = MathHelper.clamp(
-            0.45f + (seededUnit(worldSeed, 0x3c6ef372fe94f82bL) - 0.5f) * 0.30f,
+    private static LevelScaleDriver createDefault(long LevelSeed) {
+        List<CycloneCell> defaultCycloneCells = createDefaultCycloneCells(LevelSeed);
+        float baseDirection = seededUnit(LevelSeed, 0x15f11f73d3e4a5b1L) * TAU;
+        float baseSpeed = 1.8f + seededUnit(LevelSeed, 0x6a09e667f3bcc909L) * 2.2f;
+        float baseFlowX = Mth.cos(baseDirection) * baseSpeed;
+        float baseFlowZ = Mth.sin(baseDirection) * baseSpeed;
+        float airmassTemperatureBias = (seededUnit(LevelSeed, 0xbb67ae8584caa73bL) - 0.5f) * 6.0f;
+        float airmassMoistureBias = Mth.clamp(
+            0.45f + (seededUnit(LevelSeed, 0x3c6ef372fe94f82bL) - 0.5f) * 0.30f,
             0.05f,
             0.95f
         );
-        float planetaryWavePhase = seededUnit(worldSeed, 0xa54ff53a5f1d36f1L) * TAU;
-        float stormActivity = MathHelper.clamp(
-            0.15f + seededUnit(worldSeed, 0x510e527fade682d1L) * 0.25f,
+        float planetaryWavePhase = seededUnit(LevelSeed, 0xa54ff53a5f1d36f1L) * TAU;
+        float stormActivity = Mth.clamp(
+            0.15f + seededUnit(LevelSeed, 0x510e527fade682d1L) * 0.25f,
             0.0f,
             1.0f
         );
-        float seasonPhase = seededUnit(worldSeed, 0x9b05688c2b3e6c1fL);
-        return new WorldScaleDriver(
-            worldSeed,
+        float seasonPhase = seededUnit(LevelSeed, 0x9b05688c2b3e6c1fL);
+        return new LevelScaleDriver(
+            LevelSeed,
             0.0f,
             baseFlowX,
             baseFlowZ,
@@ -155,13 +155,13 @@ final class WorldScaleDriver {
             stormActivity,
             seasonPhase,
             defaultCycloneCells,
-            createDefaultConvectiveClusters(worldSeed, defaultCycloneCells),
+            createDefaultConvectiveClusters(LevelSeed, defaultCycloneCells),
             List.of()
         );
     }
 
-    private static WorldScaleDriver fromLines(long worldSeed, List<String> lines) {
-        WorldScaleDriver driver = createDefault(worldSeed);
+    private static LevelScaleDriver fromLines(long LevelSeed, List<String> lines) {
+        LevelScaleDriver driver = createDefault(LevelSeed);
         for (String rawLine : lines) {
             if (rawLine == null) {
                 continue;
@@ -195,13 +195,13 @@ final class WorldScaleDriver {
             }
         }
         driver.cycloneCells.clear();
-        driver.cycloneCells.addAll(parseCycloneCells(worldSeed, lines));
+        driver.cycloneCells.addAll(parseCycloneCells(LevelSeed, lines));
         driver.convectiveClusters.clear();
-        driver.convectiveClusters.addAll(parseConvectiveClusters(worldSeed, lines, driver.cycloneCells));
+        driver.convectiveClusters.addAll(parseConvectiveClusters(LevelSeed, lines, driver.cycloneCells));
         driver.tornadoVortices.clear();
         driver.tornadoVortices.addAll(parseTornadoVortices(lines));
-        driver.airmassMoistureBias = MathHelper.clamp(driver.airmassMoistureBias, 0.0f, 1.0f);
-        driver.stormActivity = MathHelper.clamp(driver.stormActivity, 0.0f, 1.0f);
+        driver.airmassMoistureBias = Mth.clamp(driver.airmassMoistureBias, 0.0f, 1.0f);
+        driver.stormActivity = Mth.clamp(driver.stormActivity, 0.0f, 1.0f);
         driver.seasonPhase = wrap01(driver.seasonPhase);
         driver.planetaryWavePhase = wrapTau(driver.planetaryWavePhase);
         return driver;
@@ -276,8 +276,8 @@ final class WorldScaleDriver {
     }
 
     synchronized void advance(
-        ServerWorld world,
-        AeroServerRuntime.WorldEnvironmentSnapshot environmentSnapshot,
+        ServerLevel level,
+        AeroServerRuntime.LevelEnvironmentSnapshot environmentSnapshot,
         long tickCounter,
         float dtSeconds,
         MesoscaleGrid.DiagnosticsSummary mesoscaleSummary,
@@ -290,28 +290,28 @@ final class WorldScaleDriver {
         lastTickUpdated = tickCounter;
         driverTimeSeconds += elapsedSeconds;
 
-        long worldTime = environmentSnapshot == null ? world.getTimeOfDay() : environmentSnapshot.timeOfDay();
-        seasonPhase = wrap01(worldTime / (float) SEASON_PERIOD_TICKS);
+        long LevelTime = environmentSnapshot == null ? level.getDayTime() : environmentSnapshot.timeOfDay();
+        seasonPhase = wrap01(LevelTime / (float) SEASON_PERIOD_TICKS);
         planetaryWavePhase = wrapTau(planetaryWavePhase + elapsedSeconds * PLANETARY_WAVE_RADIANS_PER_SECOND);
 
-        float rain = environmentSnapshot == null ? world.getRainGradient(1.0f) : environmentSnapshot.rainGradient();
-        float thunder = environmentSnapshot == null ? world.getThunderGradient(1.0f) : environmentSnapshot.thunderGradient();
+        float rain = environmentSnapshot == null ? level.getRainLevel(1.0f) : environmentSnapshot.rainGradient();
+        float thunder = environmentSnapshot == null ? level.getThunderLevel(1.0f) : environmentSnapshot.thunderGradient();
 
-        float preferredDirection = seededUnit(worldSeed, 0x15f11f73d3e4a5b1L) * TAU
-            + 0.35f * MathHelper.sin(planetaryWavePhase * 0.35f)
-            + 0.20f * MathHelper.cos(planetaryWavePhase * 0.18f + seededUnit(worldSeed, 0x428a2f98d728ae22L) * TAU);
-        float fairWeatherSpeed = (1.8f + seededUnit(worldSeed, 0x6a09e667f3bcc909L) * 2.2f)
-            * synopticCalmFactor(worldSeed, planetaryWavePhase);
+        float preferredDirection = seededUnit(LevelSeed, 0x15f11f73d3e4a5b1L) * TAU
+            + 0.35f * Mth.sin(planetaryWavePhase * 0.35f)
+            + 0.20f * Mth.cos(planetaryWavePhase * 0.18f + seededUnit(LevelSeed, 0x428a2f98d728ae22L) * TAU);
+        float fairWeatherSpeed = (1.8f + seededUnit(LevelSeed, 0x6a09e667f3bcc909L) * 2.2f)
+            * synopticCalmFactor(LevelSeed, planetaryWavePhase);
         float preferredSpeed = fairWeatherSpeed + rain * 0.8f + thunder * 1.2f;
-        float targetFlowX = MathHelper.cos(preferredDirection) * preferredSpeed;
-        float targetFlowZ = MathHelper.sin(preferredDirection) * preferredSpeed;
+        float targetFlowX = Mth.cos(preferredDirection) * preferredSpeed;
+        float targetFlowZ = Mth.sin(preferredDirection) * preferredSpeed;
         baseFlowX = relax(baseFlowX, targetFlowX, elapsedSeconds, BASE_FLOW_RELAX_PER_SECOND);
         baseFlowZ = relax(baseFlowZ, targetFlowZ, elapsedSeconds, BASE_FLOW_RELAX_PER_SECOND);
 
-        float seededTempBias = (seededUnit(worldSeed, 0xbb67ae8584caa73bL) - 0.5f) * 6.0f;
-        float seasonalTempBias = MathHelper.sin(seasonPhase * TAU) * 4.5f;
+        float seededTempBias = (seededUnit(LevelSeed, 0xbb67ae8584caa73bL) - 0.5f) * 6.0f;
+        float seasonalTempBias = Mth.sin(seasonPhase * TAU) * 4.5f;
         float weatherTempBias = -(rain * 1.5f + thunder * 2.0f);
-        float waveTempBias = 1.2f * MathHelper.sin(planetaryWavePhase * 0.6f);
+        float waveTempBias = 1.2f * Mth.sin(planetaryWavePhase * 0.6f);
         float targetTemperatureBias = seededTempBias + seasonalTempBias + weatherTempBias + waveTempBias;
         airmassTemperatureBias = relax(
             airmassTemperatureBias,
@@ -320,27 +320,27 @@ final class WorldScaleDriver {
             THERMAL_RELAX_PER_SECOND
         );
 
-        float seededMoistureBias = 0.45f + (seededUnit(worldSeed, 0x3c6ef372fe94f82bL) - 0.5f) * 0.30f;
+        float seededMoistureBias = 0.45f + (seededUnit(LevelSeed, 0x3c6ef372fe94f82bL) - 0.5f) * 0.30f;
         float weatherMoistureBias = rain * 0.30f + thunder * 0.20f;
-        float waveMoistureBias = 0.10f * MathHelper.cos(planetaryWavePhase * 0.55f);
-        float targetMoistureBias = MathHelper.clamp(
+        float waveMoistureBias = 0.10f * Mth.cos(planetaryWavePhase * 0.55f);
+        float targetMoistureBias = Mth.clamp(
             seededMoistureBias + weatherMoistureBias + waveMoistureBias,
             0.05f,
             0.95f
         );
-        airmassMoistureBias = MathHelper.clamp(
+        airmassMoistureBias = Mth.clamp(
             relax(airmassMoistureBias, targetMoistureBias, elapsedSeconds, MOISTURE_RELAX_PER_SECOND),
             0.0f,
             1.0f
         );
 
-        float targetStormActivity = MathHelper.clamp(
+        float targetStormActivity = Mth.clamp(
             0.20f + 0.45f * airmassMoistureBias + 0.25f * rain + 0.25f * thunder,
             0.0f,
             1.0f
         );
         updateMesoscaleSupport(mesoscaleSummary);
-        targetStormActivity = MathHelper.clamp(
+        targetStormActivity = Mth.clamp(
             targetStormActivity
                 + 0.18f * mesoscaleConvectiveSupport
                 + 0.10f * mesoscaleLiftSupport
@@ -364,7 +364,7 @@ final class WorldScaleDriver {
                 baseFlowX,
                 baseFlowZ,
                 stormActivity,
-                worldSeed,
+                LevelSeed,
                 driverTimeSeconds,
                 cycloneCells,
                 i,
@@ -373,7 +373,7 @@ final class WorldScaleDriver {
                 mesoscaleShearSupport
             );
         }
-        maybeSpawnTornadoVortices(world, mesoscaleGrid, mesoscaleFocus);
+        maybeSpawnTornadoVortices(level, mesoscaleGrid, mesoscaleFocus);
         for (int i = tornadoVortices.size() - 1; i >= 0; i--) {
             TornadoVortex vortex = tornadoVortices.get(i);
             vortex.advance(elapsedSeconds);
@@ -386,12 +386,12 @@ final class WorldScaleDriver {
     synchronized Sample sample(int cellX, int cellZ) {
         float sampleX = cellX * DRIVER_SPATIAL_SCALE_X;
         float sampleZ = cellZ * DRIVER_SPATIAL_SCALE_Z;
-        float waveA = MathHelper.sin(sampleX + planetaryWavePhase * 0.70f);
-        float waveB = MathHelper.cos(sampleZ - planetaryWavePhase * 0.45f);
-        float eddy = MathHelper.sin((sampleX + sampleZ) * 0.55f + planetaryWavePhase * 0.25f);
+        float waveA = Mth.sin(sampleX + planetaryWavePhase * 0.70f);
+        float waveB = Mth.cos(sampleZ - planetaryWavePhase * 0.45f);
+        float eddy = Mth.sin((sampleX + sampleZ) * 0.55f + planetaryWavePhase * 0.25f);
 
         float activeStormActivity = finiteClamp(stormActivity, 0.0f, 1.0f, 0.0f);
-        float waveWindScale = MathHelper.lerp(synopticCalmFactor(worldSeed, planetaryWavePhase), 0.20f, 1.0f);
+        float waveWindScale = Mth.lerp(synopticCalmFactor(LevelSeed, planetaryWavePhase), 0.20f, 1.0f);
         float targetWindX = finiteOrDefault(baseFlowX, 0.0f) + waveWindScale * (0.90f * waveA + 0.35f * eddy);
         float targetWindZ = finiteOrDefault(baseFlowZ, 0.0f) + waveWindScale * (0.90f * waveB - 0.35f * eddy);
         float pressureAnomalyPa = PLANETARY_WAVE_PRESSURE_PA * (0.70f * waveA - 0.55f * waveB + 0.35f * eddy);
@@ -527,43 +527,43 @@ final class WorldScaleDriver {
 
     private static float finiteClamp(float value, float min, float max, float fallback) {
         if (Float.isFinite(value)) {
-            return MathHelper.clamp(value, min, max);
+            return Mth.clamp(value, min, max);
         }
-        return MathHelper.clamp(finiteOrDefault(fallback, min), min, max);
+        return Mth.clamp(finiteOrDefault(fallback, min), min, max);
     }
 
-    private static List<CycloneCell> createDefaultCycloneCells(long worldSeed) {
+    private static List<CycloneCell> createDefaultCycloneCells(long LevelSeed) {
         List<CycloneCell> cells = new ArrayList<>(DEFAULT_CYCLONE_CELL_COUNT);
         for (int i = 0; i < DEFAULT_CYCLONE_CELL_COUNT; i++) {
             long salt = 0x632be59bd9b4e019L + (long) i * 0x9e3779b97f4a7c15L;
-            float centerX = seededUnit(worldSeed, salt ^ 0x94d049bb133111ebL) * PRESSURE_DOMAIN_CELLS;
-            float centerZ = seededUnit(worldSeed, salt ^ 0x2545f4914f6cdd1dL) * PRESSURE_DOMAIN_CELLS;
-            float radiusCells = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x4cf5ad432745937fL),
+            float centerX = seededUnit(LevelSeed, salt ^ 0x94d049bb133111ebL) * PRESSURE_DOMAIN_CELLS;
+            float centerZ = seededUnit(LevelSeed, salt ^ 0x2545f4914f6cdd1dL) * PRESSURE_DOMAIN_CELLS;
+            float radiusCells = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x4cf5ad432745937fL),
                 CYCLONE_CELL_MIN_RADIUS,
                 CYCLONE_CELL_MAX_RADIUS
             );
-            float intensity = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x6c8e9cf570932bd5L),
+            float intensity = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x6c8e9cf570932bd5L),
                 0.55f,
                 0.95f
             );
             float pressureSign = (i & 1) == 0 ? -1.0f : 1.0f;
             float warmCoreBiasKelvin = pressureSign < 0.0f
-                ? MathHelper.lerp(seededUnit(worldSeed, salt ^ 0xcbbb9d5dc1059ed8L), 1.0f, 3.6f)
-                : -MathHelper.lerp(seededUnit(worldSeed, salt ^ 0x629a292a367cd507L), 0.6f, 2.2f);
+                ? Mth.lerp(seededUnit(LevelSeed, salt ^ 0xcbbb9d5dc1059ed8L), 1.0f, 3.6f)
+                : -Mth.lerp(seededUnit(LevelSeed, salt ^ 0x629a292a367cd507L), 0.6f, 2.2f);
             float moistureCoreBias = pressureSign < 0.0f
-                ? MathHelper.lerp(seededUnit(worldSeed, salt ^ 0x9159015a3070dd17L), 0.04f, 0.14f)
-                : -MathHelper.lerp(seededUnit(worldSeed, salt ^ 0x152fecd8f70e5939L), 0.03f, 0.10f);
-            float driftDirection = seededUnit(worldSeed, salt ^ 0xa4093822299f31d0L) * TAU;
-            float driftSpeedCellsPerSecond = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x082efa98ec4e6c89L),
+                ? Mth.lerp(seededUnit(LevelSeed, salt ^ 0x9159015a3070dd17L), 0.04f, 0.14f)
+                : -Mth.lerp(seededUnit(LevelSeed, salt ^ 0x152fecd8f70e5939L), 0.03f, 0.10f);
+            float driftDirection = seededUnit(LevelSeed, salt ^ 0xa4093822299f31d0L) * TAU;
+            float driftSpeedCellsPerSecond = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x082efa98ec4e6c89L),
                 0.0012f,
                 0.0040f
             );
-            float driftX = MathHelper.cos(driftDirection) * driftSpeedCellsPerSecond;
-            float driftZ = MathHelper.sin(driftDirection) * driftSpeedCellsPerSecond;
-            float lifecyclePhase = seededUnit(worldSeed, salt ^ 0x452821e638d01377L) * TAU;
+            float driftX = Mth.cos(driftDirection) * driftSpeedCellsPerSecond;
+            float driftZ = Mth.sin(driftDirection) * driftSpeedCellsPerSecond;
+            float lifecyclePhase = seededUnit(LevelSeed, salt ^ 0x452821e638d01377L) * TAU;
             cells.add(new CycloneCell(
                 centerX,
                 centerZ,
@@ -580,7 +580,7 @@ final class WorldScaleDriver {
         return cells;
     }
 
-    private static List<ConvectiveCluster> createDefaultConvectiveClusters(long worldSeed, List<CycloneCell> cycloneCells) {
+    private static List<ConvectiveCluster> createDefaultConvectiveClusters(long LevelSeed, List<CycloneCell> cycloneCells) {
         List<CycloneCell> lowPressureCells = new ArrayList<>();
         for (CycloneCell cell : cycloneCells) {
             if (cell.pressureSign < 0.0f) {
@@ -593,53 +593,53 @@ final class WorldScaleDriver {
             CycloneCell host = lowPressureCells.isEmpty()
                 ? cycloneCells.get(i % cycloneCells.size())
                 : lowPressureCells.get(i % lowPressureCells.size());
-            float offsetAngle = seededUnit(worldSeed, salt ^ 0x6eed0e9da4d94a4fL) * TAU;
-            float offsetRadius = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x1f83d9abfb41bd6bL),
+            float offsetAngle = seededUnit(LevelSeed, salt ^ 0x6eed0e9da4d94a4fL) * TAU;
+            float offsetRadius = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x1f83d9abfb41bd6bL),
                 host.radiusCells * 0.15f,
                 host.radiusCells * 0.65f
             );
-            float centerX = wrapDomain(host.centerCellX + MathHelper.cos(offsetAngle) * offsetRadius);
-            float centerZ = wrapDomain(host.centerCellZ + MathHelper.sin(offsetAngle) * offsetRadius);
-            float radiusCells = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x5be0cd19137e2179L),
+            float centerX = wrapDomain(host.centerCellX + Mth.cos(offsetAngle) * offsetRadius);
+            float centerZ = wrapDomain(host.centerCellZ + Mth.sin(offsetAngle) * offsetRadius);
+            float radiusCells = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x5be0cd19137e2179L),
                 CONVECTIVE_CLUSTER_MIN_RADIUS,
                 CONVECTIVE_CLUSTER_MAX_RADIUS
             );
-            float intensity = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xcbbb9d5dc1059ed8L),
+            float intensity = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xcbbb9d5dc1059ed8L),
                 0.45f,
                 1.00f
             );
-            float driftDirection = seededUnit(worldSeed, salt ^ 0x428a2f98d728ae22L) * TAU;
-            float driftSpeedCellsPerSecond = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x7137449123ef65cdL),
+            float driftDirection = seededUnit(LevelSeed, salt ^ 0x428a2f98d728ae22L) * TAU;
+            float driftSpeedCellsPerSecond = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x7137449123ef65cdL),
                 0.0015f,
                 0.0065f
             );
-            float warmBiasKelvin = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xb5c0fbcfec4d3b2fL),
+            float warmBiasKelvin = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xb5c0fbcfec4d3b2fL),
                 1.0f,
                 3.8f
             );
-            float moistureBias = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xe9b5dba58189dbbcL),
+            float moistureBias = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xe9b5dba58189dbbcL),
                 0.05f,
                 0.18f
             );
-            float convergenceMps = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x3956c25bf348b538L),
+            float convergenceMps = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x3956c25bf348b538L),
                 1.2f,
                 CONVECTIVE_CLUSTER_MAX_CONVERGENCE_MPS
             );
-            float lifecyclePhase = seededUnit(worldSeed, salt ^ 0x59f111f1b605d019L) * TAU;
+            float lifecyclePhase = seededUnit(LevelSeed, salt ^ 0x59f111f1b605d019L) * TAU;
             clusters.add(new ConvectiveCluster(
                 centerX,
                 centerZ,
                 radiusCells,
                 intensity,
-                MathHelper.cos(driftDirection) * driftSpeedCellsPerSecond,
-                MathHelper.sin(driftDirection) * driftSpeedCellsPerSecond,
+                Mth.cos(driftDirection) * driftSpeedCellsPerSecond,
+                Mth.sin(driftDirection) * driftSpeedCellsPerSecond,
                 lifecyclePhase,
                 warmBiasKelvin,
                 moistureBias,
@@ -649,7 +649,7 @@ final class WorldScaleDriver {
         return clusters;
     }
 
-    private static CycloneCell preferredCycloneHost(List<CycloneCell> cycloneCells, int clusterIndex, long worldSeed, int cycleOrdinal) {
+    private static CycloneCell preferredCycloneHost(List<CycloneCell> cycloneCells, int clusterIndex, long LevelSeed, int cycleOrdinal) {
         List<CycloneCell> lowPressureCells = new ArrayList<>();
         for (CycloneCell cell : cycloneCells) {
             if (cell.pressureSign < 0.0f) {
@@ -661,11 +661,11 @@ final class WorldScaleDriver {
             return null;
         }
         int baseIndex = Math.floorMod(clusterIndex + cycleOrdinal, pool.size());
-        int jitter = Math.round(seededSigned(worldSeed, 0x7f4a7c159e3779b9L + (long) clusterIndex * 1315423911L + cycleOrdinal) * (pool.size() - 1));
+        int jitter = Math.round(seededSigned(LevelSeed, 0x7f4a7c159e3779b9L + (long) clusterIndex * 1315423911L + cycleOrdinal) * (pool.size() - 1));
         return pool.get(Math.floorMod(baseIndex + jitter, pool.size()));
     }
 
-    private static List<CycloneCell> parseCycloneCells(long worldSeed, List<String> lines) {
+    private static List<CycloneCell> parseCycloneCells(long LevelSeed, List<String> lines) {
         int count = DEFAULT_CYCLONE_CELL_COUNT;
         for (String rawLine : lines) {
             if (rawLine == null) {
@@ -687,7 +687,7 @@ final class WorldScaleDriver {
             }
         }
 
-        List<CycloneCell> defaults = createDefaultCycloneCells(worldSeed);
+        List<CycloneCell> defaults = createDefaultCycloneCells(LevelSeed);
         List<CycloneCell> cells = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             CycloneCell fallback = defaults.get(i % defaults.size());
@@ -741,7 +741,7 @@ final class WorldScaleDriver {
     }
 
     private static List<ConvectiveCluster> parseConvectiveClusters(
-        long worldSeed,
+        long LevelSeed,
         List<String> lines,
         List<CycloneCell> cycloneCells
     ) {
@@ -766,7 +766,7 @@ final class WorldScaleDriver {
             }
         }
 
-        List<ConvectiveCluster> defaults = createDefaultConvectiveClusters(worldSeed, cycloneCells);
+        List<ConvectiveCluster> defaults = createDefaultConvectiveClusters(LevelSeed, cycloneCells);
         List<ConvectiveCluster> clusters = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             ConvectiveCluster fallback = defaults.get(i % defaults.size());
@@ -888,7 +888,7 @@ final class WorldScaleDriver {
         return vortices;
     }
 
-    private void maybeSpawnTornadoVortices(ServerWorld world, MesoscaleGrid mesoscaleGrid, BlockPos mesoscaleFocus) {
+    private void maybeSpawnTornadoVortices(ServerLevel level, MesoscaleGrid mesoscaleGrid, BlockPos mesoscaleFocus) {
         if (mesoscaleGrid == null || mesoscaleFocus == null) {
             return;
         }
@@ -903,7 +903,7 @@ final class WorldScaleDriver {
             if (!cluster.supportsTornadoGenesis(stormActivity)) {
                 continue;
             }
-            BlockPos clusterPos = clusterWorldPosition(cluster, mesoscaleFocus, world.getSeaLevel());
+            BlockPos clusterPos = clusterLevelPosition(cluster, mesoscaleFocus, level.getSeaLevel());
             MesoscaleGrid.TornadoEnvironment environment = mesoscaleGrid.sampleTornadoEnvironment(
                 clusterPos,
                 TORNADO_ENVIRONMENT_RADIUS_CELLS
@@ -921,12 +921,12 @@ final class WorldScaleDriver {
             CycloneCell host = preferredCycloneHost(
                 cycloneCells,
                 i,
-                worldSeed,
+                LevelSeed,
                 Math.max(0, (int) Math.floor(driverTimeSeconds / (24000.0f / 20.0f)))
             );
             tornadoVortices.add(spawnTornadoVortex(i, cluster, host, clusterPos, environment, tornadoSupport));
-            cluster.tornadoCooldownSeconds = MathHelper.lerp(
-                MathHelper.clamp(tornadoSupport - TORNADO_MIN_SUPPORT, 0.0f, 1.0f),
+            cluster.tornadoCooldownSeconds = Mth.lerp(
+                Mth.clamp(tornadoSupport - TORNADO_MIN_SUPPORT, 0.0f, 1.0f),
                 TORNADO_MIN_CLUSTER_COOLDOWN_SECONDS,
                 TORNADO_MAX_CLUSTER_COOLDOWN_SECONDS
             );
@@ -942,19 +942,19 @@ final class WorldScaleDriver {
         float tornadoSupport
     ) {
         long salt = 0x6f31e7d49a52b8c3L + (long) nextTornadoId * 0x9e3779b97f4a7c15L;
-        float jitterRadiusBlocks = 24.0f + 48.0f * MathHelper.clamp(tornadoSupport - TORNADO_MIN_SUPPORT, 0.0f, 1.0f);
-        float jitterAngle = seededUnit(worldSeed, salt ^ 0x94d049bb133111ebL) * TAU;
-        float jitterRadius = seededUnit(worldSeed, salt ^ 0x2545f4914f6cdd1dL) * jitterRadiusBlocks;
-        float centerBlockX = clusterPos.getX() + MathHelper.cos(jitterAngle) * jitterRadius;
-        float centerBlockZ = clusterPos.getZ() + MathHelper.sin(jitterAngle) * jitterRadius;
+        float jitterRadiusBlocks = 24.0f + 48.0f * Mth.clamp(tornadoSupport - TORNADO_MIN_SUPPORT, 0.0f, 1.0f);
+        float jitterAngle = seededUnit(LevelSeed, salt ^ 0x94d049bb133111ebL) * TAU;
+        float jitterRadius = seededUnit(LevelSeed, salt ^ 0x2545f4914f6cdd1dL) * jitterRadiusBlocks;
+        float centerBlockX = clusterPos.getX() + Mth.cos(jitterAngle) * jitterRadius;
+        float centerBlockZ = clusterPos.getZ() + Mth.sin(jitterAngle) * jitterRadius;
         float clusterDriftXBlocksPerSecond = cluster.driftCellsPerSecondX * DRIVER_CELL_SIZE_BLOCKS;
         float clusterDriftZBlocksPerSecond = cluster.driftCellsPerSecondZ * DRIVER_CELL_SIZE_BLOCKS;
-        float lifetimeSeconds = MathHelper.lerp(
-            MathHelper.clamp((tornadoSupport - TORNADO_MIN_SUPPORT) / 0.7f, 0.0f, 1.0f),
+        float lifetimeSeconds = Mth.lerp(
+            Mth.clamp((tornadoSupport - TORNADO_MIN_SUPPORT) / 0.7f, 0.0f, 1.0f),
             TORNADO_MIN_LIFETIME_SECONDS,
             TORNADO_MAX_LIFETIME_SECONDS
         );
-        float intensity = MathHelper.clamp(
+        float intensity = Mth.clamp(
             0.55f
                 + 0.18f * environment.maxInstabilityProxy()
                 + 0.16f * environment.maxLiftProxy()
@@ -963,34 +963,34 @@ final class WorldScaleDriver {
             0.4f,
             2.0f
         );
-        float coreRadiusBlocks = MathHelper.lerp(
-            MathHelper.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f,
+        float coreRadiusBlocks = Mth.lerp(
+            Mth.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f,
             TORNADO_MIN_CORE_RADIUS_BLOCKS,
             TORNADO_MAX_CORE_RADIUS_BLOCKS
         );
         float influenceRadiusBlocks = Math.max(
             TORNADO_MIN_INFLUENCE_RADIUS_BLOCKS,
-            MathHelper.lerp(MathHelper.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f, TORNADO_MIN_INFLUENCE_RADIUS_BLOCKS, TORNADO_MAX_INFLUENCE_RADIUS_BLOCKS)
+            Mth.lerp(Mth.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f, TORNADO_MIN_INFLUENCE_RADIUS_BLOCKS, TORNADO_MAX_INFLUENCE_RADIUS_BLOCKS)
         );
-        float tangentialWindScaleMps = MathHelper.lerp(
-            MathHelper.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f,
+        float tangentialWindScaleMps = Mth.lerp(
+            Mth.clamp(tornadoSupport, 0.0f, 1.5f) / 1.5f,
             TORNADO_MIN_TANGENTIAL_WIND_MPS,
             TORNADO_MAX_TANGENTIAL_WIND_MPS
         );
         float radialInflowScaleMps = tangentialWindScaleMps * TORNADO_MAX_RADIAL_INFLOW_SCALE;
-        float updraftScale = MathHelper.clamp(
+        float updraftScale = Mth.clamp(
             0.65f + 0.35f * environment.maxLiftProxy() + 0.10f * environment.meanPositiveMoistureConvergence() * 256.0f * 8.0f,
             0.4f,
             2.5f
         );
-        float condensationBias = MathHelper.clamp(
+        float condensationBias = Mth.clamp(
             0.45f + 0.40f * environment.meanHumidity() + 0.12f * environment.meanLiftProxy(),
             0.0f,
             1.5f
         );
         float rotationSign = host != null
             ? (host.pressureSign < 0.0f ? 1.0f : -1.0f)
-            : (seededSigned(worldSeed, salt ^ 0x1f83d9abfb41bd6bL) < 0.0f ? -1.0f : 1.0f);
+            : (seededSigned(LevelSeed, salt ^ 0x1f83d9abfb41bd6bL) < 0.0f ? -1.0f : 1.0f);
 
         TornadoVortex vortex = TornadoVortex.defaultVortex();
         vortex.id = nextTornadoId++;
@@ -1014,16 +1014,16 @@ final class WorldScaleDriver {
         return vortex;
     }
 
-    private BlockPos clusterWorldPosition(ConvectiveCluster cluster, BlockPos mesoscaleFocus, int baseY) {
+    private BlockPos clusterLevelPosition(ConvectiveCluster cluster, BlockPos mesoscaleFocus, int baseY) {
         int focusCellX = Math.floorDiv(mesoscaleFocus.getX(), Math.round(DRIVER_CELL_SIZE_BLOCKS));
         int focusCellZ = Math.floorDiv(mesoscaleFocus.getZ(), Math.round(DRIVER_CELL_SIZE_BLOCKS));
         float focusCenterBlockX = focusCellX * DRIVER_CELL_SIZE_BLOCKS + DRIVER_CELL_SIZE_BLOCKS * 0.5f;
         float focusCenterBlockZ = focusCellZ * DRIVER_CELL_SIZE_BLOCKS + DRIVER_CELL_SIZE_BLOCKS * 0.5f;
         float dxCells = shortestWrappedDelta(cluster.centerCellX, focusCellX);
         float dzCells = shortestWrappedDelta(cluster.centerCellZ, focusCellZ);
-        int worldX = MathHelper.floor(focusCenterBlockX + dxCells * DRIVER_CELL_SIZE_BLOCKS);
-        int worldZ = MathHelper.floor(focusCenterBlockZ + dzCells * DRIVER_CELL_SIZE_BLOCKS);
-        return new BlockPos(worldX, baseY, worldZ);
+        int LevelX = Mth.floor(focusCenterBlockX + dxCells * DRIVER_CELL_SIZE_BLOCKS);
+        int LevelZ = Mth.floor(focusCenterBlockZ + dzCells * DRIVER_CELL_SIZE_BLOCKS);
+        return new BlockPos(LevelX, baseY, LevelZ);
     }
 
     private float computeTornadoSupport(ConvectiveCluster cluster, MesoscaleGrid.TornadoEnvironment environment) {
@@ -1031,7 +1031,7 @@ final class WorldScaleDriver {
         float shearScore = Math.min(1.5f, environment.maxLowLevelShear() / 5.5f);
         float convergenceScore = Math.min(1.5f, environment.maxPositiveMoistureConvergence() * 256.0f * 8.0f);
         float liftScore = Math.min(1.5f, environment.maxLiftProxy());
-        float humidityScore = MathHelper.clamp(environment.meanHumidity(), 0.0f, 1.0f);
+        float humidityScore = Mth.clamp(environment.meanHumidity(), 0.0f, 1.0f);
         float clusterScore = Math.min(1.5f, cluster.intensity / 1.1f);
         return 0.25f * instabilityScore
             + 0.22f * shearScore
@@ -1085,8 +1085,8 @@ final class WorldScaleDriver {
     private static float relax(float current, float target, float deltaSeconds, float ratePerSecond) {
         float safeTarget = finiteOrDefault(target, finiteOrDefault(current, 0.0f));
         float safeCurrent = finiteOrDefault(current, safeTarget);
-        float alpha = MathHelper.clamp(deltaSeconds * ratePerSecond, 0.0f, 1.0f);
-        return MathHelper.lerp(alpha, safeCurrent, safeTarget);
+        float alpha = Mth.clamp(deltaSeconds * ratePerSecond, 0.0f, 1.0f);
+        return Mth.lerp(alpha, safeCurrent, safeTarget);
     }
 
     private static float wrap01(float value) {
@@ -1106,14 +1106,14 @@ final class WorldScaleDriver {
 
     private static float synopticCalmFactor(long seed, float planetaryWavePhase) {
         float phase = seededUnit(seed, 0x8c6f5d2b1a3e7c49L) * TAU;
-        float lullWave = 0.5f + 0.5f * MathHelper.sin(planetaryWavePhase * 0.23f + phase);
+        float lullWave = 0.5f + 0.5f * Mth.sin(planetaryWavePhase * 0.23f + phase);
         float lullEnvelope = lullWave * lullWave;
-        return MathHelper.lerp(lullEnvelope, SYNOPTIC_LULL_MIN_FACTOR, 1.0f);
+        return Mth.lerp(lullEnvelope, SYNOPTIC_LULL_MIN_FACTOR, 1.0f);
     }
 
     private static float coriolisLatitudeSine(float cellZ) {
         float centeredZ = wrapDomain(cellZ) - PRESSURE_DOMAIN_CELLS * 0.5f;
-        return MathHelper.clamp(centeredZ / (PRESSURE_DOMAIN_CELLS * 0.5f), -1.0f, 1.0f);
+        return Mth.clamp(centeredZ / (PRESSURE_DOMAIN_CELLS * 0.5f), -1.0f, 1.0f);
     }
 
     private static float shortestWrappedDelta(float sample, float center) {
@@ -1328,18 +1328,18 @@ final class WorldScaleDriver {
                 return CycloneContribution.ZERO;
             }
 
-            float distance = Math.max(1.0e-3f, MathHelper.sqrt(distanceSquared));
+            float distance = Math.max(1.0e-3f, Mth.sqrt(distanceSquared));
             float radiusNorm = distance / Math.max(1.0f, radiusCells);
             float outerNorm = distance / Math.max(1.0f, radiusCells * 2.5f);
             float outerEnvelope = (float) Math.exp(-outerNorm * outerNorm * 0.95f);
             float coreRadius = Math.max(1.0f, radiusCells * CYCLONE_CELL_CORE_RADIUS_FACTOR);
             float coreNorm = distance / coreRadius;
             float coreEnvelope = (float) Math.exp(-coreNorm * coreNorm * 1.8f);
-            float coreSuppression = MathHelper.clamp(distance / Math.max(1.0f, coreRadius * 0.25f), 0.0f, 1.0f);
+            float coreSuppression = Mth.clamp(distance / Math.max(1.0f, coreRadius * 0.25f), 0.0f, 1.0f);
             float stormScale = pressureSign < 0.0f
-                ? MathHelper.lerp(stormActivity, 0.80f, 1.25f)
-                : MathHelper.lerp(stormActivity, 1.05f, 0.90f);
-            float lifecycleScale = 0.85f + 0.15f * MathHelper.sin(lifecyclePhase);
+                ? Mth.lerp(stormActivity, 0.80f, 1.25f)
+                : Mth.lerp(stormActivity, 1.05f, 0.90f);
+            float lifecycleScale = 0.85f + 0.15f * Mth.sin(lifecyclePhase);
             float effectiveIntensity = intensity * stormScale * lifecycleScale;
 
             float latitudeSine = coriolisLatitudeSine(cellZ);
@@ -1405,7 +1405,7 @@ final class WorldScaleDriver {
                 case "center_x" -> centerCellX = wrapDomain(value);
                 case "center_z" -> centerCellZ = wrapDomain(value);
                 case "radius_cells" -> radiusCells = Math.max(1.0f, value);
-                case "intensity" -> intensity = MathHelper.clamp(value, 0.05f, 2.0f);
+                case "intensity" -> intensity = Mth.clamp(value, 0.05f, 2.0f);
                 case "pressure_sign" -> pressureSign = value < 0.0f ? -1.0f : 1.0f;
                 case "drift_x_cells_per_second" -> driftCellsPerSecondX = value;
                 case "drift_z_cells_per_second" -> driftCellsPerSecondZ = value;
@@ -1480,7 +1480,7 @@ final class WorldScaleDriver {
             float baseFlowX,
             float baseFlowZ,
             float stormActivity,
-            long worldSeed,
+            long LevelSeed,
             float driverTimeSeconds,
             List<CycloneCell> cycloneCells,
             int clusterIndex,
@@ -1495,7 +1495,7 @@ final class WorldScaleDriver {
                 lifecyclePhase = Math.min(lifecyclePhase, TAU * 0.12f);
             } else if (lifecyclePhase < previousPhase) {
                 respawn(
-                    worldSeed,
+                    LevelSeed,
                     driverTimeSeconds,
                     cycloneCells,
                     clusterIndex,
@@ -1513,7 +1513,7 @@ final class WorldScaleDriver {
         }
 
         private void respawn(
-            long worldSeed,
+            long LevelSeed,
             float driverTimeSeconds,
             List<CycloneCell> cycloneCells,
             int clusterIndex,
@@ -1523,59 +1523,59 @@ final class WorldScaleDriver {
             float mesoscaleShearSupport
         ) {
             int cycleOrdinal = Math.max(0, (int) Math.floor(driverTimeSeconds / (24000.0f / 20.0f)));
-            CycloneCell host = preferredCycloneHost(cycloneCells, clusterIndex, worldSeed, cycleOrdinal);
+            CycloneCell host = preferredCycloneHost(cycloneCells, clusterIndex, LevelSeed, cycleOrdinal);
             long salt = 0x4f1bbcdc676f3a29L
                 + (long) clusterIndex * 0x9e3779b97f4a7c15L
                 + (long) cycleOrdinal * 0x94d049bb133111ebL;
-            float hostCenterX = host == null ? seededUnit(worldSeed, salt ^ 0x2e1b21385c26c926L) * PRESSURE_DOMAIN_CELLS : host.centerCellX;
-            float hostCenterZ = host == null ? seededUnit(worldSeed, salt ^ 0x27d4eb2f165667c5L) * PRESSURE_DOMAIN_CELLS : host.centerCellZ;
+            float hostCenterX = host == null ? seededUnit(LevelSeed, salt ^ 0x2e1b21385c26c926L) * PRESSURE_DOMAIN_CELLS : host.centerCellX;
+            float hostCenterZ = host == null ? seededUnit(LevelSeed, salt ^ 0x27d4eb2f165667c5L) * PRESSURE_DOMAIN_CELLS : host.centerCellZ;
             float hostRadius = host == null ? 18.0f : host.radiusCells;
-            float offsetAngle = seededUnit(worldSeed, salt ^ 0x7137449123ef65cdL) * TAU;
-            float offsetRadius = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xb5c0fbcfec4d3b2fL),
+            float offsetAngle = seededUnit(LevelSeed, salt ^ 0x7137449123ef65cdL) * TAU;
+            float offsetRadius = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xb5c0fbcfec4d3b2fL),
                 hostRadius * 0.10f,
                 hostRadius * 0.55f
             );
-            centerCellX = wrapDomain(hostCenterX + MathHelper.cos(offsetAngle) * offsetRadius);
-            centerCellZ = wrapDomain(hostCenterZ + MathHelper.sin(offsetAngle) * offsetRadius);
-            radiusCells = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xe9b5dba58189dbbcL),
+            centerCellX = wrapDomain(hostCenterX + Mth.cos(offsetAngle) * offsetRadius);
+            centerCellZ = wrapDomain(hostCenterZ + Mth.sin(offsetAngle) * offsetRadius);
+            radiusCells = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xe9b5dba58189dbbcL),
                 CONVECTIVE_CLUSTER_MIN_RADIUS,
                 CONVECTIVE_CLUSTER_MAX_RADIUS
             );
-            float supportGain = MathHelper.clamp(
+            float supportGain = Mth.clamp(
                 0.60f + 0.40f * mesoscaleConvectiveSupport + 0.20f * mesoscaleLiftSupport,
                 0.40f,
                 1.80f
             );
-            intensity = MathHelper.lerp(
-                MathHelper.clamp(stormActivity, 0.0f, 1.0f),
+            intensity = Mth.lerp(
+                Mth.clamp(stormActivity, 0.0f, 1.0f),
                 0.35f,
-                MathHelper.lerp(seededUnit(worldSeed, salt ^ 0x3956c25bf348b538L), 0.85f, 1.20f)
+                Mth.lerp(seededUnit(LevelSeed, salt ^ 0x3956c25bf348b538L), 0.85f, 1.20f)
             ) * supportGain;
-            float driftDirection = seededUnit(worldSeed, salt ^ 0x59f111f1b605d019L) * TAU;
-            float driftSpeedCellsPerSecond = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x923f82a4af194f9bL),
+            float driftDirection = seededUnit(LevelSeed, salt ^ 0x59f111f1b605d019L) * TAU;
+            float driftSpeedCellsPerSecond = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x923f82a4af194f9bL),
                 0.0010f,
                 0.0060f
             );
-            driftCellsPerSecondX = MathHelper.cos(driftDirection) * driftSpeedCellsPerSecond;
-            driftCellsPerSecondZ = MathHelper.sin(driftDirection) * driftSpeedCellsPerSecond;
-            warmBiasKelvin = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xab1c5ed5da6d8118L),
+            driftCellsPerSecondX = Mth.cos(driftDirection) * driftSpeedCellsPerSecond;
+            driftCellsPerSecondZ = Mth.sin(driftDirection) * driftSpeedCellsPerSecond;
+            warmBiasKelvin = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xab1c5ed5da6d8118L),
                 0.8f,
                 4.2f
-            ) * MathHelper.lerp(stormActivity, 0.75f, 1.15f) * MathHelper.lerp(mesoscaleLiftSupport, 0.85f, 1.25f);
-            moistureBias = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0xd807aa98a3030242L),
+            ) * Mth.lerp(stormActivity, 0.75f, 1.15f) * Mth.lerp(mesoscaleLiftSupport, 0.85f, 1.25f);
+            moistureBias = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0xd807aa98a3030242L),
                 0.04f,
                 0.20f
-            ) * MathHelper.lerp(stormActivity, 0.70f, 1.20f) * MathHelper.lerp(mesoscaleConvectiveSupport, 0.80f, 1.30f);
-            convergenceMps = MathHelper.lerp(
-                seededUnit(worldSeed, salt ^ 0x12835b0145706fbeL),
+            ) * Mth.lerp(stormActivity, 0.70f, 1.20f) * Mth.lerp(mesoscaleConvectiveSupport, 0.80f, 1.30f);
+            convergenceMps = Mth.lerp(
+                seededUnit(LevelSeed, salt ^ 0x12835b0145706fbeL),
                 1.0f,
                 CONVECTIVE_CLUSTER_MAX_CONVERGENCE_MPS
-            ) * MathHelper.lerp(stormActivity, 0.70f, 1.25f) * MathHelper.lerp(mesoscaleShearSupport, 0.90f, 1.20f);
+            ) * Mth.lerp(stormActivity, 0.70f, 1.25f) * Mth.lerp(mesoscaleShearSupport, 0.90f, 1.20f);
             lifecyclePhase = 0.0f;
         }
 
@@ -1588,18 +1588,18 @@ final class WorldScaleDriver {
                 return ConvectiveContribution.ZERO;
             }
 
-            float distance = Math.max(1.0e-3f, MathHelper.sqrt(distanceSquared));
+            float distance = Math.max(1.0e-3f, Mth.sqrt(distanceSquared));
             float coreNorm = distance / Math.max(1.0f, radiusCells);
             float anvilNorm = distance / Math.max(1.0f, radiusCells * 1.8f);
             float coreEnvelope = (float) Math.exp(-coreNorm * coreNorm * 1.6f);
             float anvilEnvelope = (float) Math.exp(-anvilNorm * anvilNorm * 0.7f);
-            float lifeProgress = MathHelper.clamp(lifecyclePhase / TAU, 0.0f, 1.0f);
-            float lifecycleEnvelope = MathHelper.sin(lifeProgress * (float) Math.PI);
+            float lifeProgress = Mth.clamp(lifecyclePhase / TAU, 0.0f, 1.0f);
+            float lifecycleEnvelope = Mth.sin(lifeProgress * (float) Math.PI);
             if (lifecycleEnvelope <= CONVECTIVE_CLUSTER_MIN_EFFECTIVE_ENVELOPE) {
                 return ConvectiveContribution.ZERO;
             }
-            float lifecycleScale = (0.35f + 0.65f * lifecycleEnvelope) * (0.80f + 0.20f * MathHelper.sin(lifecyclePhase));
-            float effectiveIntensity = intensity * MathHelper.lerp(stormActivity, 0.70f, 1.35f) * lifecycleScale;
+            float lifecycleScale = (0.35f + 0.65f * lifecycleEnvelope) * (0.80f + 0.20f * Mth.sin(lifecyclePhase));
+            float effectiveIntensity = intensity * Mth.lerp(stormActivity, 0.70f, 1.35f) * lifecycleScale;
 
             float radialX = -dx / distance;
             float radialZ = -dz / distance;
@@ -1611,7 +1611,7 @@ final class WorldScaleDriver {
             float windZ = radialZ * convergence + tangentZ * swirl;
             float temperatureBias = warmBiasKelvin * effectiveIntensity * (0.80f * coreEnvelope + 0.30f * anvilEnvelope);
             float humidityBias = moistureBias * effectiveIntensity * (0.90f * coreEnvelope + 0.55f * anvilEnvelope);
-            float envelope = MathHelper.clamp(0.85f * coreEnvelope + 0.25f * anvilEnvelope, 0.0f, 1.0f);
+            float envelope = Mth.clamp(0.85f * coreEnvelope + 0.25f * anvilEnvelope, 0.0f, 1.0f);
             float heatingKelvin = Math.max(0.0f, warmBiasKelvin) * effectiveIntensity * (0.65f * coreEnvelope + 0.20f * anvilEnvelope);
             float moistening = Math.max(0.0f, moistureBias) * effectiveIntensity * (0.75f * coreEnvelope + 0.35f * anvilEnvelope);
             float inflowX = radialX * convergence;
@@ -1640,8 +1640,8 @@ final class WorldScaleDriver {
             if (stormActivity < TORNADO_MIN_STORM_ACTIVITY) {
                 return false;
             }
-            float lifecycleProgress = MathHelper.clamp(lifecyclePhase / TAU, 0.0f, 1.0f);
-            float lifecycleEnvelope = MathHelper.sin(lifecycleProgress * (float) Math.PI);
+            float lifecycleProgress = Mth.clamp(lifecyclePhase / TAU, 0.0f, 1.0f);
+            float lifecycleEnvelope = Mth.sin(lifecycleProgress * (float) Math.PI);
             return intensity >= 0.55f
                 && lifecycleProgress >= 0.20f
                 && lifecycleProgress <= 0.78f
@@ -1668,13 +1668,13 @@ final class WorldScaleDriver {
                 case "center_x" -> centerCellX = wrapDomain(value);
                 case "center_z" -> centerCellZ = wrapDomain(value);
                 case "radius_cells" -> radiusCells = Math.max(1.0f, value);
-                case "intensity" -> intensity = MathHelper.clamp(value, 0.05f, 2.0f);
+                case "intensity" -> intensity = Mth.clamp(value, 0.05f, 2.0f);
                 case "drift_x_cells_per_second" -> driftCellsPerSecondX = value;
                 case "drift_z_cells_per_second" -> driftCellsPerSecondZ = value;
                 case "lifecycle_phase" -> lifecyclePhase = wrapTau(value);
                 case "warm_bias_kelvin" -> warmBiasKelvin = value;
-                case "moisture_bias" -> moistureBias = MathHelper.clamp(value, -0.40f, 0.40f);
-                case "convergence_mps" -> convergenceMps = MathHelper.clamp(value, 0.1f, 8.0f);
+                case "moisture_bias" -> moistureBias = Mth.clamp(value, -0.40f, 0.40f);
+                case "convergence_mps" -> convergenceMps = Mth.clamp(value, 0.1f, 8.0f);
                 default -> {
                 }
             }
@@ -1709,7 +1709,7 @@ final class WorldScaleDriver {
             ageSeconds = Math.max(0.0f, ageSeconds + elapsedSeconds);
             centerBlockX += translationXBlocksPerSecond * elapsedSeconds;
             centerBlockZ += translationZBlocksPerSecond * elapsedSeconds;
-            float lifeRatio = lifetimeSeconds <= 1.0e-3f ? 1.0f : MathHelper.clamp(ageSeconds / lifetimeSeconds, 0.0f, 1.0f);
+            float lifeRatio = lifetimeSeconds <= 1.0e-3f ? 1.0f : Mth.clamp(ageSeconds / lifetimeSeconds, 0.0f, 1.0f);
             if (lifeRatio < 0.18f) {
                 stateOrdinal = 0;
             } else if (lifeRatio < 0.75f) {
@@ -1759,16 +1759,16 @@ final class WorldScaleDriver {
                 return TornadoContribution.ZERO;
             }
 
-            float distance = Math.max(1.0e-3f, MathHelper.sqrt(distanceSquared));
+            float distance = Math.max(1.0e-3f, Mth.sqrt(distanceSquared));
             float outerNorm = distance / Math.max(1.0f, influenceRadiusBlocks);
             float coreNorm = distance / Math.max(1.0f, coreRadiusBlocks);
             float outerEnvelope = (float) Math.exp(-outerNorm * outerNorm * 1.2f);
             float coreEnvelope = (float) Math.exp(-coreNorm * coreNorm * 2.2f);
-            float lifecycleProgress = lifetimeSeconds <= 1.0e-3f ? 1.0f : MathHelper.clamp(ageSeconds / lifetimeSeconds, 0.0f, 1.0f);
+            float lifecycleProgress = lifetimeSeconds <= 1.0e-3f ? 1.0f : Mth.clamp(ageSeconds / lifetimeSeconds, 0.0f, 1.0f);
             float lifecycleEnvelope = lifecycleProgress < 0.18f
-                ? MathHelper.clamp(lifecycleProgress / 0.18f, 0.0f, 1.0f)
+                ? Mth.clamp(lifecycleProgress / 0.18f, 0.0f, 1.0f)
                 : (lifecycleProgress > 0.78f
-                    ? MathHelper.clamp((1.0f - lifecycleProgress) / 0.22f, 0.0f, 1.0f)
+                    ? Mth.clamp((1.0f - lifecycleProgress) / 0.22f, 0.0f, 1.0f)
                     : 1.0f);
             float effectiveIntensity = Math.max(0.0f, intensity) * lifecycleEnvelope;
             if (effectiveIntensity <= 1.0e-3f) {
@@ -1795,7 +1795,7 @@ final class WorldScaleDriver {
                 case "parent_convective_cluster_id" -> parentConvectiveClusterId = Math.max(-1, Math.round(value));
                 case "age_seconds" -> ageSeconds = Math.max(0.0f, value);
                 case "lifetime_seconds" -> lifetimeSeconds = Math.max(1.0f, value);
-                case "state_ordinal" -> stateOrdinal = MathHelper.clamp(Math.round(value), 0, 3);
+                case "state_ordinal" -> stateOrdinal = Mth.clamp(Math.round(value), 0, 3);
                 case "center_block_x" -> centerBlockX = value;
                 case "center_block_z" -> centerBlockZ = value;
                 case "base_y" -> baseY = value;
