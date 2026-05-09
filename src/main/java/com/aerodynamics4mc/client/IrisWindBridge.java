@@ -1,6 +1,5 @@
 package com.aerodynamics4mc.client;
 
-import java.lang.reflect.Method;
 import java.util.Arrays;
 
 import org.slf4j.Logger;
@@ -11,6 +10,7 @@ import com.aerodynamics4mc.api.AeroClientWindApi;
 import com.aerodynamics4mc.api.SamplePolicy;
 import com.mojang.blaze3d.platform.NativeImage;
 
+import net.irisshaders.iris.api.v0.IrisApi;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureManager;
@@ -42,10 +42,6 @@ final class IrisWindBridge {
     static final float WIND_TO_BEND_SCALE = 9.6f;
     static final float MAX_BEND_MAGNITUDE = 1.2f;
     static final float MAX_BEND_VELOCITY_PER_TICK = 0.30f;
-
-    private static boolean irisReflectionInitialized;
-    private static Object irisApiInstance;
-    private static Method irisShaderPackInUseMethod;
 
     private final AeroVisualizer visualizer;
     private DynamicTexture windTexture;
@@ -110,7 +106,7 @@ final class IrisWindBridge {
         }
         loggedMissingIris = false;
 
-        boolean shaderPackInUse = isShaderPackInUseReflective();
+        boolean shaderPackInUse = isShaderPackInUse();
         if (!shaderPackInUse) {
             if (!loggedInactiveShaderpack) {
                 LOGGER.info("Iris wind bridge idle: no active shaderpack detected");
@@ -160,7 +156,7 @@ final class IrisWindBridge {
         if (!streamingEnabled) {
             return;
         }
-        if (!ModList.get().isLoaded("iris") || !isShaderPackInUseReflective()) {
+        if (!ModList.get().isLoaded("iris") || !isShaderPackInUse()) {
             return;
         }
         long gameTime = client.level.getGameTime();
@@ -457,26 +453,7 @@ final class IrisWindBridge {
 
     private record RefreshStats(int nonZeroCells, double maxSpeed, double meanSpeed, boolean complete) {}
 
-    @SuppressWarnings("unused")
-    private static boolean isShaderPackInUseReflective() {
-        try {
-            if (!irisReflectionInitialized) {
-                Class<?> irisApiClass = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
-                Method getInstance = irisApiClass.getMethod("getInstance");
-                irisApiInstance = getInstance.invoke(null);
-                irisShaderPackInUseMethod = irisApiClass.getMethod("isShaderPackInUse");
-                irisReflectionInitialized = true;
-            }
-            if (irisApiInstance == null || irisShaderPackInUseMethod == null) {
-                return false;
-            }
-            Object result = irisShaderPackInUseMethod.invoke(irisApiInstance);
-            return result instanceof Boolean bool && bool;
-        } catch (Throwable ignored) {
-            irisReflectionInitialized = true;
-            irisApiInstance = null;
-            irisShaderPackInUseMethod = null;
-            return false;
-        }
+    private static boolean isShaderPackInUse() {
+        return IrisApi.getInstance().isShaderPackInUse();
     }
 }

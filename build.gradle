@@ -1,16 +1,16 @@
 plugins {
-	id 'eclipse'
-	id 'idea'
-	id 'maven-publish'
-	id 'net.minecraftforge.gradle' version '[6.0,6.2)'
-	id 'org.spongepowered.mixin' version '0.7.+'
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'org.spongepowered.mixin' version '0.7.+'
 }
 
 version = mod_version
 group = mod_group_id
 
 base {
-	archivesName = mod_id
+    archivesName = mod_id
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
@@ -23,150 +23,188 @@ mixin {
 }
 
 repositories {
-	mavenCentral()
-	maven {
-		name = "Forge"
-		url = "https://files.minecraftforge.net/maven"
-	}
-	maven {
-		name = "SpongePowered"
-		url = "https://repo.spongepowered.org/repository/maven-public/"
-	}
+    mavenCentral()
+    maven {
+        name = "Forge"
+        url = "https://files.minecraftforge.net/maven"
+    }
+    maven {
+        name = "SpongePowered"
+        url = "https://repo.spongepowered.org/repository/maven-public/"
+    }
+    maven {
+        name = "Valkyrien Skies"
+        url = "https://maven.valkyrienskies.org"
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "Modrinth"
+                url = "https://api.modrinth.com/maven"
+            }
+        }
+        forRepositories(fg.repository)
+        filter {
+            includeGroup "maven.modrinth"
+        }
+    }
 }
 
 minecraft {
-	mappings channel: mapping_channel, version: mapping_version
-	
-	copyIdeResources = true
+    mappings channel: mapping_channel, version: mapping_version
+    
+    copyIdeResources = true
 
-	runs {
-		configureEach {
-			workingDirectory project.file('run')
-			
-			property 'forge.logging.markers', 'REGISTRIES'
-			property 'forge.logging.console.level', 'debug'
-			
-			mods {
-				"${mod_id}" {
-					source sourceSets.main
-				}
-			}
-		}
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
 
-		client {
-			property 'forge.enabledGameTestNamespaces', mod_id
-		}
+        client {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
 
-		server {
-			property 'forge.enabledGameTestNamespaces', mod_id
-			args '--nogui'
-		}
-	}
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+            args '--nogui'
+        }
+    }
 }
 
 def generatedNativeResourcesDir = layout.buildDirectory.dir("generated/native-resources")
 
 tasks.register("prepareNativeResources") {
-	outputs.dir(generatedNativeResourcesDir)
-	outputs.upToDateWhen { false }
+    outputs.dir(generatedNativeResourcesDir)
+    outputs.upToDateWhen { false }
 
-	doLast {
-		File outDir = generatedNativeResourcesDir.get().asFile
-		delete(outDir)
-		outDir.mkdirs()
-		int packedCount = 0
+    doLast {
+        File outDir = generatedNativeResourcesDir.get().asFile
+        delete(outDir)
+        outDir.mkdirs()
+        int packedCount = 0
 
-		File distNativesDir = file("native/dist/natives")
-		if (distNativesDir.exists()) {
-			copy {
-				from(distNativesDir)
-				into(new File(outDir, "natives"))
-			}
-			packedCount += fileTree(distNativesDir).files.size()
-		}
+        File distNativesDir = file("native/dist/natives")
+        if (distNativesDir.exists()) {
+            copy {
+                from(distNativesDir)
+                into(new File(outDir, "natives"))
+            }
+            packedCount += fileTree(distNativesDir).files.size()
+        }
 
-		File prebuiltDir = file("native/prebuilt")
-		if (prebuiltDir.exists()) {
-			copy {
-				from(prebuiltDir)
-				into(outDir)
-				exclude("**/.gitkeep")
-			}
-			packedCount += fileTree(prebuiltDir) {
-				exclude("**/.gitkeep")
-			}.files.size()
-		}
+        File prebuiltDir = file("native/prebuilt")
+        if (prebuiltDir.exists()) {
+            copy {
+                from(prebuiltDir)
+                into(outDir)
+                exclude("**/.gitkeep")
+            }
+            packedCount += fileTree(prebuiltDir) {
+                exclude("**/.gitkeep")
+            }.files.size()
+        }
 
-		def copyNativeBinary = { File src, String relativeTarget ->
-			if (!src.exists()) {
-				return
-			}
-			File dst = new File(outDir, relativeTarget)
-			dst.parentFile.mkdirs()
-			copy {
-				from(src)
-				into(dst.parentFile)
-				rename { dst.name }
-			}
-			packedCount += 1
-		}
+        def copyNativeBinary = { File src, String relativeTarget ->
+            if (!src.exists()) {
+                return
+            }
+            File dst = new File(outDir, relativeTarget)
+            dst.parentFile.mkdirs()
+            copy {
+                from(src)
+                into(dst.parentFile)
+                rename { dst.name }
+            }
+            packedCount += 1
+        }
 
-		copyNativeBinary(file("native/build/libaero_lbm.so"), "natives/linux-x86_64/libaero_lbm.so")
-		copyNativeBinary(file("native/build/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
-		copyNativeBinary(file("native/build/Release/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
-		copyNativeBinary(file("native/build-linux-arm64/libaero_lbm.so"), "natives/linux-arm64/libaero_lbm.so")
-		copyNativeBinary(file("native/build-macos-arm64/libaero_lbm.dylib"), "natives/macos-arm64/libaero_lbm.dylib")
-		copyNativeBinary(file("native/build-windows-x86_64/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
+        copyNativeBinary(file("native/build/libaero_lbm.so"), "natives/linux-x86_64/libaero_lbm.so")
+        copyNativeBinary(file("native/build/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
+        copyNativeBinary(file("native/build/Release/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
+        copyNativeBinary(file("native/build-linux-arm64/libaero_lbm.so"), "natives/linux-arm64/libaero_lbm.so")
+        copyNativeBinary(file("native/build-macos-arm64/libaero_lbm.dylib"), "natives/macos-arm64/libaero_lbm.dylib")
+        copyNativeBinary(file("native/build-windows-x86_64/aero_lbm.dll"), "natives/windows-x86_64/aero_lbm.dll")
 
-		if (packedCount == 0) {
-			logger.lifecycle("prepareNativeResources: no native binaries found")
-		} else {
-			logger.lifecycle("prepareNativeResources: packaged ${packedCount} native file(s)")
-		}
-	}
+        if (packedCount == 0) {
+            logger.lifecycle("prepareNativeResources: no native binaries found")
+        } else {
+            logger.lifecycle("prepareNativeResources: packaged ${packedCount} native file(s)")
+        }
+    }
 }
 
 dependencies {
-	minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-	implementation "com.github.luben:zstd-jni:1.5.7-4"
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    implementation "com.github.luben:zstd-jni:1.5.7-4"
+    compileOnly fg.deobf("maven.modrinth:oculus:${oculus_version}")
+    compileOnly fg.deobf("maven.modrinth:embeddium:${embeddium_version}")
+    runtimeOnly fg.deobf("maven.modrinth:oculus:${oculus_version}")
+    runtimeOnly fg.deobf("maven.modrinth:embeddium:${embeddium_version}")
+
+    // Valkyrien Skies — soft optional integration. compileOnly so we can call the
+    // API without forcing VS to be installed at runtime; every call site is gated
+    // behind a ModList check (see runtime/VsBridge.java).
+    compileOnly fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:${vs2_version}")
+    compileOnly "org.valkyrienskies.core:api:${vscore_version}"
+    compileOnly "org.valkyrienskies.core:util:${vscore_version}"
+    compileOnly "org.valkyrienskies.core:internal:${vscore_version}"
+    compileOnly "org.joml:joml:1.10.4"
+    compileOnly "org.joml:joml-primitives:1.10.0"
+
+    runtimeOnly fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:${vs2_version}")
+    runtimeOnly "org.valkyrienskies.core:api:${vscore_version}"
+    runtimeOnly "org.valkyrienskies.core:util:${vscore_version}"
+    runtimeOnly "org.valkyrienskies.core:internal:${vscore_version}"
+    runtimeOnly "org.joml:joml:1.10.4"
+    runtimeOnly "org.joml:joml-primitives:1.10.0"
+    runtimeOnly "maven.modrinth:kotlin-for-forge:${kff_version}"
 }
 
 processResources {
-	dependsOn tasks.named("prepareNativeResources")
-	inputs.property "version", project.version
-	from(generatedNativeResourcesDir)
+    dependsOn tasks.named("prepareNativeResources")
+    inputs.property "version", project.version
+    from(generatedNativeResourcesDir)
 
-	filesMatching("META-INF/mods.toml") {
-		expand project.properties
-	}
+    filesMatching("META-INF/mods.toml") {
+        expand project.properties
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 17
-	it.options.encoding = 'UTF-8'
+    it.options.release = 17
+    it.options.encoding = 'UTF-8'
 }
 
 java {
-	withSourcesJar()
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(17)
-	}
+    withSourcesJar()
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
 }
 
 // configure the maven publication
 publishing {
-	publications {
-		create("mavenJava", MavenPublication) {
-			artifactId = mod_id
-			from components.java
-		}
-	}
+    publications {
+        create("mavenJava", MavenPublication) {
+            artifactId = mod_id
+            from components.java
+        }
+    }
 
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
-	}
+    // See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+    repositories {
+        // Add repositories to publish to here.
+        // Notice: This block does NOT have the same function as the block in the top level.
+        // The repositories here will be used for publishing your artifact, not for
+        // retrieving dependencies.
+    }
 }

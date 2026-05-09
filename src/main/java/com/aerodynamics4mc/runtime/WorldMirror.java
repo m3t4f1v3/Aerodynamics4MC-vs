@@ -123,6 +123,10 @@ final class LevelMirror {
         private boolean liveBuildQueued;
         private boolean liveBuildHighPriority;
         private boolean storeLoadHighPriority;
+        // Set when a section is intersected by a VS ship: forces a live rebuild every
+        // refresh and skips writing the snapshot to the on-disk static store, since
+        // ship blocks are dynamic and would otherwise persist a stale obstacle silhouette.
+        private boolean skipStaticStore;
         private long generation;
     }
 
@@ -238,6 +242,29 @@ final class LevelMirror {
         requestSectionBuildLocked(server, levelKey, alignedOrigin, entry, highPriority);
     }
 
+    /**
+     * Mark a section as containing a dynamic ship overlay. Forces a live rebuild
+     * (bypassing the static-store cache) and prevents the rebuilt snapshot from being
+     * persisted to disk. Intended to be called every tick for sections overlapping VS
+     * ships so the obstacle field tracks ship motion without thrashing the store.
+     */
+    synchronized void markSectionForShipOverlay(
+        MinecraftServer server,
+        ResourceKey<Level> levelKey,
+        BlockPos sectionOrigin,
+        boolean highPriority
+    ) {
+        BlockPos alignedOrigin = alignSectionOrigin(sectionOrigin);
+        DimensionMirror dimension = dimension(levelKey);
+        SectionEntry entry = dimension.sections.computeIfAbsent(alignedOrigin.asLong(), ignored -> new SectionEntry());
+        entry.dirty = true;
+        entry.storeLoadEligible = false;
+        entry.skipStaticStore = true;
+        entry.generation++;
+        staticStore.invalidateSection(server, levelKey, alignedOrigin);
+        requestSectionBuildLocked(server, levelKey, alignedOrigin, entry, highPriority);
+    }
+
     void drainLiveBuilds(MinecraftServer server, int highPriorityBudget, int lowPriorityBudget, SectionBuilder builder) {
         for (int i = 0; i < highPriorityBudget; i++) {
             BuildRequest request;
@@ -276,7 +303,9 @@ final class LevelMirror {
                 entry.dirty = false;
                 entry.storeLoadEligible = false;
                 entry.storeLoadInFlight = false;
-                staticStore.storeSection(server, request.levelKey(), request.sectionOrigin(), entry.snapshot);
+                if (!entry.skipStaticStore) {
+                    staticStore.storeSection(server, request.levelKey(), request.sectionOrigin(), entry.snapshot);
+                }
             }
         }
         for (int i = 0; i < lowPriorityBudget; i++) {
@@ -316,7 +345,9 @@ final class LevelMirror {
                 entry.dirty = false;
                 entry.storeLoadEligible = false;
                 entry.storeLoadInFlight = false;
-                staticStore.storeSection(server, request.levelKey(), request.sectionOrigin(), entry.snapshot);
+                if (!entry.skipStaticStore) {
+                    staticStore.storeSection(server, request.levelKey(), request.sectionOrigin(), entry.snapshot);
+                }
             }
         }
     }

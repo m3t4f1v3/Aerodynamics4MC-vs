@@ -435,6 +435,22 @@ public final class AeroServerRuntime {
         INSTANCE.onBlockChanged(level, pos, oldState, newState);
     }
 
+    /**
+     * Marks a section as overlapped by a Valkyrien Skies ship and queues an immediate rebuild.
+     * Snapshot persistence is suppressed for this section so the ship's footprint stays dynamic.
+     * Called from {@link VsBridge} every tick for every section the ship currently covers.
+     */
+    public static void notifyShipOverlaySection(ServerLevel level, BlockPos sectionOrigin) {
+        if (level == null || sectionOrigin == null) {
+            return;
+        }
+        MinecraftServer server = level.getServer();
+        if (server == null) {
+            return;
+        }
+        INSTANCE.LevelMirror.markSectionForShipOverlay(server, level.dimension(), sectionOrigin, true);
+    }
+
     public static void handleClientL2Preference(ServerPlayer player, boolean enabled) {
         INSTANCE.setClientLocalL2Preference(player, enabled);
     }
@@ -2902,6 +2918,7 @@ public final class AeroServerRuntime {
             lastMaxFlowSpeed = frame.maxSpeed();
         }
         updateSimulationRate(publishedSteps);
+        VsBridge.tickShipForces(server, AeroServerRuntime::sampleFlow, tickCounter);
         recordMainThreadPhase(MAIN_THREAD_PHASE_TOTAL, System.nanoTime() - tickStartNanos);
     }
 
@@ -4078,6 +4095,7 @@ public final class AeroServerRuntime {
                 }
             }
         }
+        VsBridge.augmentSectionWithShipObstacles(level, origin, snapshot.obstacle(), CHUNK_SIZE);
         for (int x = 0; x < CHUNK_SIZE; x++) {
             for (int y = 0; y < CHUNK_SIZE; y++) {
                 for (int z = 0; z < CHUNK_SIZE; z++) {
